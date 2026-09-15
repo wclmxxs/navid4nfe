@@ -68,15 +68,15 @@ def load_plan(world_size=8) -> dict:
 
 
 def dit_compile_enabled() -> bool:
-    return _compile_enabled("DIT_COMPILE")
+    return _compile_enabled("DIT_COMPILE", default="1")
 
 
 def vae_compile_enabled() -> bool:
     return _compile_enabled("VAE_COMPILE")
 
 
-def _compile_enabled(name: str) -> bool:
-    value = os.environ.get(name, "0")
+def _compile_enabled(name: str, default: str = "0") -> bool:
+    value = os.environ.get(name, default)
     if value not in {"0", "1"}:
         raise ValueError(f"{name} must be 0 or 1")
     return value == "1"

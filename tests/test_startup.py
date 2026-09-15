@@ -41,10 +41,12 @@ def test_container_limit_caps_large_host_ram_including_parent(tmp_path):
     assert loading_parallelism(available) == 2
 
 
-@pytest.mark.parametrize("name,enabled", [("DIT_COMPILE", dit_compile_enabled), ("VAE_COMPILE", vae_compile_enabled)])
-def test_compile_defaults_off_and_explicit_override(monkeypatch, name, enabled):
+@pytest.mark.parametrize("name,enabled,default", [
+    ("DIT_COMPILE", dit_compile_enabled, True), ("VAE_COMPILE", vae_compile_enabled, False),
+])
+def test_compile_defaults_and_explicit_override(monkeypatch, name, enabled, default):
     monkeypatch.delenv(name, raising=False)
-    assert not enabled()
+    assert enabled() is default
     monkeypatch.setenv(name, "1")
     assert enabled()
     monkeypatch.setenv(name, "0")

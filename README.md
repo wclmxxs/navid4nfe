@@ -1,6 +1,6 @@
 # Navid 4 NFE：8× H200 一键部署 Ref2VA
 
-常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA 四步 LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **24 FPS、带音频的 MP4**，默认 1344×768；支持 **4～15 整数秒、自定义横竖版分辨率、参考图短边、请求级 Sol attention / DiT 缓存**。默认只启用 **Sol τ=1.5**，关闭 **DiT cache、DiT/VAE 的 torch.compile**；Sol 内核容量固定按 4096 tokens 对齐。
+常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA 四步 LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **24 FPS、带音频的 MP4**，默认 1344×768；支持 **4～15 整数秒、自定义横竖版分辨率、参考图短边、请求级 Sol attention / DiT 缓存**。默认启用 **Sol τ=1.5、DiT cache 和 DiT torch.compile**，VAE 编译关闭；Sol / DiT 序列容量固定按 4096 tokens 对齐。
 
 ## 启动：只执行一个脚本
 
@@ -55,14 +55,14 @@ PORT=8000 CHECKPOINT_DIR=/data/models/navid4nfe DATA_DIR=/data/navid4nfe ./deplo
 
 如使用环境变量配置，后续命令也需使用同一组变量；长期配置建议放 `.env`。
 
-本次默认只保留 Sol。升级已有部署时，将 `.env` 中相关项设为：
+默认启用 Sol、DiT cache 和 DiT 编译。升级已有部署时，将 `.env` 中相关项设为（只需修改一次，后续直接 start/restart）：
 
 ```bash
 SOL_ATTN_ENABLED=1
 SOL_ATTN_TAU=1.5
 SOL_ATTN_DENSE_STEPS=1
-CACHE_DIT_ENABLED=0
-DIT_COMPILE=0
+CACHE_DIT_ENABLED=1
+DIT_COMPILE=1
 VAE_COMPILE=0
 ```
 
@@ -70,7 +70,7 @@ VAE_COMPILE=0
 
 ```bash
 SOL_ATTN_ENABLED=1 SOL_ATTN_TAU=1.5 SOL_ATTN_DENSE_STEPS=1 \
-CACHE_DIT_ENABLED=0 DIT_COMPILE=0 VAE_COMPILE=0 ./deploy.sh restart
+CACHE_DIT_ENABLED=1 DIT_COMPILE=1 VAE_COMPILE=0 ./deploy.sh restart
 ```
 
 已有权重时设置 `MODEL_DIR` 和 `ADAPTER_PATH`，脚本校验并直接复用：
@@ -144,7 +144,7 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
       "dense_prefix_seconds": 0
     },
     "cache_dit": {
-      "enabled": false,
+      "enabled": true,
       "warmup": 1,
       "rdt": 0.08,
       "max_continuous_cached_steps": 1
@@ -171,15 +171,15 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
 
 省略的调优字段继承 `.env` 默认值，显式 `enabled:false` 可以关闭。每个任务重新初始化缓存与配置，八卡通过全局归约决定是否复用，前一任务不会污染下一任务。参考算法：[Cache-DiT DBCache](https://github.com/vipshop/cache-dit/blob/main/docs/user_guide/DBCACHE_DESIGN.md)。
 
-默认开启 Sol（τ=1.5、首步 Dense、`exact_kv_and_rows`），关闭 DiT 缓存；启动预热与省略参数的请求使用同一配置。显式请求仍可关闭 Sol 或重新开启缓存用于对照。开启优化并不保证加速；需要观察实际 sparse calls、缓存命中和画质。H200 当前选择已有的 Sol Triton/TMA 路径并增加 runtime length 支持，没有直接套用仅支持 SM100/103 的 CuTe 编译桶。
+默认开启 Sol（τ=1.5、首步 Dense、`exact_kv_and_rows`）和 DiT 缓存（warmup=1、rdt=0.08、连续复用上限=1）；启动预热与省略参数的请求使用同一配置。显式请求可分别关闭 Sol 或缓存用于对照。缓存开启不代表每个任务都会命中；四步模型的首步和末步始终全算。开启优化并不保证加速；需要观察实际 sparse calls、缓存命中和画质。H200 当前选择已有的 Sol Triton/TMA 路径并增加 runtime length 支持，没有直接套用仅支持 SM100/103 的 CuTe 编译桶。
 
 ### 编译与资源上限
 
-- `DIT_COMPILE=0`、`VAE_COMPILE=0` **默认关闭**。DiT/VAE 直接执行 eager 前向，不使用 PyTorch 编译图和 Inductor 缓存。需要恢复实验时显式设为 1 并重启。
+- `DIT_COMPILE=1` **默认开启**，复用 PyTorch 编译图和 Inductor 磁盘缓存；`VAE_COMPILE=0` 默认关闭。显式设置 `DIT_COMPILE=0` 并重启即可使用 eager DiT，不影响请求级 Sol / DiT cache 开关。
 - packed sequence 始终向上对齐 **4096**，八卡分片均匀；额外行在注意力入口排除，不能作为 KV。提示词文本、seed、参考素材 ID 均不进入编译键。
-- Sol 的描述符容量和 autotune 按 4096 分桶，真实长度及 tau 是运行时参数。只有显式打开 `DIT_COMPILE=1` 时才编译 DiT 数值部分，通信和注意力调度仍保留 eager。显式打开 VAE 编译时按实际 tile 形状编译，不能仅凭总 token 数复用。
-- 旧 `.env` 中的 `DIT_COMPILE=1` / `VAE_COMPILE=1`、`CACHE_DIT_ENABLED=1` 或 `SOL_ATTN_ENABLED=0` 仍会覆盖新默认值。升级时将它们改成上文的 Sol-only 配置；不要直接用示例覆盖整个 `.env`，以免丢失路径、端口或凭据。
-- Sol 自身仍需要 Triton JIT 内核及 `.runtime/triton-cache`。关闭的是 DiT/VAE 的 `torch.compile`，并非每次删除或禁用 Sol 内核缓存；首次遇到新桶仍可能有内核编译/调优开销。旧 `.runtime/inductor-cache` 可留在磁盘，默认执行路径不会使用。
+- Sol 的描述符容量和 autotune 按 4096 分桶，真实长度及 tau 是运行时参数。启用 `DIT_COMPILE=1` 时编译 DiT 数值部分，通信和注意力调度仍保留 eager。显式打开 VAE 编译时按实际 tile 形状编译，不能仅凭总 token 数复用。
+- 旧 `.env` 中的 `DIT_COMPILE=0`、`CACHE_DIT_ENABLED=0` 等显式值仍会覆盖新默认值。升级时将相关项改成上文配置；不要直接用示例覆盖整个 `.env`，以免丢失路径、端口或凭据。
+- Sol 使用 `.runtime/triton-cache`，DiT 编译使用 `.runtime/inductor-cache`，两者均跨重启保留。首次遇到新桶仍可能有编译/调优开销；已有磁盘缓存也不保证跳过新进程的全部图捕获和预热。
 - `/readyz` 的 `capabilities.compilation` 显示 DiT/VAE 编译开关；`capabilities.optimization_defaults` 显示 Sol 和 DiT cache 默认值。启动预热的实际指标保存到 `.runtime/warmup-metrics.json`。
 - `metrics.compile` 分别记录 `shape_seen`（过去成功执行过该形状）、`inductor_invocations`、`inductor_compile_s`、`graph_reused`；不把“见过形状”冒充底层磁盘编译缓存命中。PyTorch 调用编译后端的耗时可能包含磁盘缓存加载。
 - `MAX_OUTPUT_PIXELS=2088960`（可容纳 1920×1088），`MAX_PACKED_TOKENS=262144`。先按输出/参考素材组合估算，再按真实 packed rows 检查。它们是准入限制，不是所有组合都能放进显存的保证；超限先降低分辨率、时长或参考大小。
@@ -248,12 +248,20 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 - 使用专用 `minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors`，不是 FastH3 的 T2VA adapter。
 - **五个 scheduler 点对应四次 DiT 前向**。保留上游 Ref2VA 的 video/audio shift `12 / 3`、LoRA alpha `8`、AdaLN 预计算、融合算子和八卡 Ulysses。
-- 默认 **Sol attention（τ=1.5）+ BF16 计算/通信**，首步仍为 Dense，DiT cache 与 DiT/VAE 编译均关闭。官方 B300 的 SOL/BSA、INT8 通信和 MXFP8 配置不直接作为 H200 默认配置，因此不能套用官网的 B300 耗时。
+- 默认 **Sol attention（τ=1.5）+ BF16 计算/通信**，首步仍为 Dense；默认启用 DiT cache / DiT 编译，关闭 VAE 编译。官方 B300 的 SOL/BSA、INT8 通信和 MXFP8 配置不直接作为 H200 默认配置，因此不能套用官网的 B300 耗时。
 - VAE 使用按 clip 的八卡 tile 并行，默认关闭 `torch.compile`，可通过 `VAE_COMPILE=1` 开启并重新验收。
 - 根据 2026-09-15 目标机器返回的 `READY` 日志，**8× H200 已通过内置 5 秒、单张图片 Ref2VA 启动预热**：每卡执行四次 DiT 前向，生成的视频和音频可解码，HTTP 就绪检查通过。开发环境另验证了接口、任务队列、进程失败清理及依赖解析。
 - 2026-09-15 的实机单图、5 秒 HTTP 任务已完成上传、提交、查询及下载验证。下载后的 MP4 完整解码通过：1344×768、24 FPS、124 帧、H.264 视频和 32 kHz AAC 音轨。该次预热后任务的 `inference_s` 为 5.973 秒，任务执行时间为 6.916 秒（不含客户端上传、下载）；这是单次观测，不是通用性能基准。
-- 2026-09-15 另已完成 33 条 768×1366、8–15 秒的 Ref2VA 实机任务，使用 Sol τ=1.5、DiT cache 关闭、DiT 编译开启；视频和音频解码通过。该批结果不能作为本次关闭 DiT 编译后的性能依据。
-- 以上实机记录不代表当前 Sol-only 默认配置已在 GPU 上重新验收。本次变更本地 CPU 测试通过，新增 GPU 数值检查将在目标机启动时执行；用 `./deploy.sh verify` 做端到端验收。多参考、视频输入、音频输入仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
+- 2026-09-15 另已完成 33 条 768×1366、8–15 秒的 Ref2VA 实机任务，使用 Sol τ=1.5、DiT cache 关闭、DiT 编译开启；视频和音频解码通过。该批结果的 DiT cache 未开启，不能作为本次默认缓存配置的性能或质量依据。
+- 以上实机记录不代表当前 Sol + DiT cache 默认组合已在 GPU 上重新验收。本次变更本地 CPU 测试通过，新增 GPU 数值检查将在目标机启动时执行；用 `./deploy.sh verify` 做端到端验收。多参考、视频输入、音频输入仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
+
+## 音频质量排查
+
+输出音频沿用 Audio VAE 的原生 32 kHz 双声道，再编码为 AAC；视频尺寸调整不会改变音频采样率，时长处理只截取对应样本、不变速。媒体解码通过仅验证格式和时长，不代表人声、音效的主观质量通过。
+
+人群场景应明确声音层次：远处低音量人群底噪、少量短促欢呼、近处清楚的脚步/快门声，避免同时要求持续大声欢呼、多人对白、广播、引擎和交响乐。H3 提示词可分别用 `overall_soundscape` 与 `non_diegetic_music` 描述环境音和配乐，参见[官方 Ref2VA 提示词指南](https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt)。修改提示词仍需试听验证，不能把嘈杂直接认定为削波或稀疏注意力问题。
+
+定位时固定素材、提示词、seed、尺寸和时长，先显式关闭 `cache_dit.enabled`，比较 `sol_attn.enabled=false` 与 Sol 1.5，再单独改声音提示词。当前 `exact_kv_and_rows` 会对音频前缀执行 Dense query，但音视频共用 Transformer，视频侧近似仍可能间接影响声音。当前 Ref2VA Turbo v0.1 的[作者推荐配置](https://github.com/ModelTC/Minimax-H3-Turbo#1-model-specs)是四次前向、video/audio shift 12/3；不要直接混用 FL2VA 的八步权重或未经验证地改采样步数。
 
 ## 固定来源
 

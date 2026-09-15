@@ -43,7 +43,7 @@ class SolOptions(StrictModel):
 
 
 class CacheOptions(StrictModel):
-    enabled: bool = False
+    enabled: bool = True
     warmup: int = Field(1, ge=1, le=4, strict=True)
     rdt: float = Field(0.08, ge=0, le=1)
     max_continuous_cached_steps: int = Field(1, ge=1, le=2, strict=True)
@@ -59,7 +59,7 @@ def optimization_defaults() -> dict:
         sol_attn=SolOptions(enabled=os.environ.get("SOL_ATTN_ENABLED", "1") == "1",
                             tau=float(os.environ.get("SOL_ATTN_TAU", "1.5")),
                             dense_steps=int(os.environ.get("SOL_ATTN_DENSE_STEPS", "1"))),
-        cache_dit=CacheOptions(enabled=os.environ.get("CACHE_DIT_ENABLED", "0") == "1",
+        cache_dit=CacheOptions(enabled=os.environ.get("CACHE_DIT_ENABLED", "1") == "1",
                                warmup=int(os.environ.get("CACHE_DIT_WARMUP", "1")),
                                rdt=float(os.environ.get("CACHE_DIT_RDT", "0.08")),
                                max_continuous_cached_steps=int(os.environ.get("CACHE_DIT_MAX_CONTINUOUS", "1"))),

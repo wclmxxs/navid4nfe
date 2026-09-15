@@ -40,7 +40,7 @@ def test_submit_query_and_download(api, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     module, client = api
     capabilities = client.get("/readyz").json()["capabilities"]
-    assert capabilities["compilation"] == {"dit": False, "vae": False}
+    assert capabilities["compilation"] == {"dit": True, "vae": False}
     ref = upload_image(client)
     response = client.post("/v1/videos", json={"prompt": "An orange ball rolls", "duration": 5, "seed": 7, "references": [ref]})
     assert response.status_code == 202
@@ -52,7 +52,7 @@ def test_submit_query_and_download(api, monkeypatch):
     assert job["execution"]["optimization"] == capabilities["optimization_defaults"]
     assert job["execution"]["optimization"]["sol_attn"]["enabled"] is True
     assert job["execution"]["optimization"]["sol_attn"]["tau"] == 1.5
-    assert job["execution"]["optimization"]["cache_dit"]["enabled"] is False
+    assert job["execution"]["optimization"]["cache_dit"]["enabled"] is True
     # Test the API handoff, not GPU synthesis; output bytes are an explicit fixture.
     output = config.DATA / "outputs" / f"{job_id}.mp4"
     output.write_bytes(b"fixture-video")

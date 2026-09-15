@@ -67,13 +67,13 @@ def test_cache_all_ranks_use_global_sums():
         assert cache.decisions[-1]["relative_change"] == 0.5
 
 
-def test_default_runtime_executes_every_block_without_torch_compile(monkeypatch):
+def test_disabled_compile_and_cache_execute_every_block(monkeypatch):
     from types import SimpleNamespace
 
     import h3_runtime
     from navid.runtime import RequestRuntime
 
-    monkeypatch.delenv("DIT_COMPILE", raising=False)
+    monkeypatch.setenv("DIT_COMPILE", "0")
     monkeypatch.setitem(sys.modules, "triton", SimpleNamespace(set_allocator=lambda allocator: None))
     installed = []
     monkeypatch.setattr(h3_runtime, "ulysses", SimpleNamespace(
@@ -82,7 +82,7 @@ def test_default_runtime_executes_every_block_without_torch_compile(monkeypatch)
         with_cp_reapplied=lambda transformer, install: install()))
 
     def unexpected_compile(*args, **kwargs):
-        pytest.fail("The default runtime must not invoke torch.compile")
+        pytest.fail("DIT_COMPILE=0 must not invoke torch.compile")
 
     monkeypatch.setattr(torch, "compile", unexpected_compile)
     calls = []

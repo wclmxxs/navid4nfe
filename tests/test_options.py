@@ -46,20 +46,22 @@ def test_partial_optimization_defaults_and_request_isolation(monkeypatch):
     monkeypatch.setenv("SOL_ATTN_ENABLED", "1")
     monkeypatch.setenv("SOL_ATTN_TAU", "1.5")
     monkeypatch.setenv("CACHE_DIT_RDT", "0.12")
-    override = request(optimization={"sol_attn": {"enabled": False}, "cache_dit": {"enabled": True}})
+    monkeypatch.setenv("CACHE_DIT_ENABLED", "1")
+    override = request(optimization={"sol_attn": {"enabled": False}, "cache_dit": {"enabled": False}})
     actual = override.resolved_optimization()
     assert actual["sol_attn"]["enabled"] is False
     assert actual["sol_attn"]["tau"] == 1.5
     assert actual["cache_dit"]["rdt"] == 0.12
+    assert actual["cache_dit"]["enabled"] is False
     assert request().resolved_optimization()["sol_attn"]["enabled"] is True
-    assert request().resolved_optimization()["cache_dit"]["enabled"] is False
+    assert request().resolved_optimization()["cache_dit"]["enabled"] is True
     for options in ({"sol_attn": {"dense_steps": 5}}, {"cache_dit": {"rdt": float("nan")}},
                     {"cache_dit": {"warmup": 0}}, {"sol_attn": {"tau": -1}}):
         with pytest.raises(ValidationError):
             request(optimization=options)
 
 
-def test_sol_only_defaults_match_api_warmup_and_runtime(monkeypatch):
+def test_optimization_defaults_match_api_warmup_and_runtime(monkeypatch):
     for name in ("SOL_ATTN_ENABLED", "SOL_ATTN_TAU", "SOL_ATTN_DENSE_STEPS", "CACHE_DIT_ENABLED"):
         monkeypatch.delenv(name, raising=False)
     expected = optimization_defaults()
@@ -67,7 +69,7 @@ def test_sol_only_defaults_match_api_warmup_and_runtime(monkeypatch):
     assert expected["sol_attn"]["tau"] == 1.5
     assert expected["sol_attn"]["dense_steps"] == 1
     assert expected["sol_attn"]["sink_conditioning"] == "exact_kv_and_rows"
-    assert expected["cache_dit"]["enabled"] is False
+    assert expected["cache_dit"]["enabled"] is True
     assert request().execution()["optimization"] == resolve_optimization(None) == expected
     monkeypatch.setenv("SOL_ATTN_TAU", "1.8")
     partial = {"sol_attn": {"enabled": False}}
