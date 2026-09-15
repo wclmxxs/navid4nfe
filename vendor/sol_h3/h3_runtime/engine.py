@@ -208,13 +208,18 @@ class MiniMaxH3Inference:
             if dist.is_initialized():
                 dist.barrier()
             if self.rank == loading_rank:
+                loading_started = time.monotonic()
                 print(f"Loading model on GPU rank {self.rank}/{self.world_size}; pid={os.getpid()}", flush=True)
                 self.pipe.load_components(**load_kwargs)
                 if before_gpu_load is not None:
                     before_gpu_load(local_rank)
                 self.pipe.to(self.device)
+                print(f"Loaded model on GPU rank {self.rank}/{self.world_size}; "
+                      f"elapsed={time.monotonic() - loading_started:.1f}s", flush=True)
             if dist.is_initialized():
                 dist.barrier()
+        if self.rank == 0:
+            print("All GPU model copies loaded; fusing LoRA and configuring inference kernels", flush=True)
         self.transformer = (
             self.pipe.transformer_ref if task == "ref2va" else self.pipe.transformer
         )

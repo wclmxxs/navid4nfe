@@ -21,6 +21,8 @@
 
 首次执行需要联网下载依赖和大模型，模型按卡依次加载以降低主机内存峰值。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
 
+等待提示和 `./deploy.sh status` 会显示本次启动最近的加载进度，GPU rank 从 0 到 7。`Loading model` 表示开始该卡加载，`Loaded model` 表示该卡权重搬运完成；八卡加载后还有 LoRA 融合和真实生成预热。仅重复出现 `loading` 不能说明卡死，需结合 worker 日志和 GPU 占用判断。`READY_TIMEOUT` 默认 7200 秒，是启动超时上限，不是预计耗时。
+
 已运行时再次执行 `./deploy.sh` 只显示现有服务状态。拉取新代码后用 `./deploy.sh restart`；若修改了 `requirements.txt`，先 `./deploy.sh stop` 再 `./deploy.sh`。
 
 ### 目标机器要求

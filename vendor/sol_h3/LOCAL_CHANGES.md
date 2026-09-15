@@ -15,6 +15,8 @@ startup. Sampling, LoRA fusion, scheduler shifts and model outputs are unchanged
 An optional `before_gpu_load` callback rechecks the current rank's free GPU memory
 after CPU loading and immediately before the CUDA transfer. Loading logs include
 each rank's PID so other GPU processes can be distinguished from this worker.
+Progress logs also mark each completed rank, elapsed loading time and the start
+of LoRA fusion so the launcher can show progress during a long startup.
 
 The wrapper `navid/h200.py` controls VAE compilation. This deployment selects Dense
 attention, BF16 compute and BF16 Ulysses transport, and uses VAE batches per clip.

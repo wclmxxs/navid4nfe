@@ -54,6 +54,31 @@ def child_command(*command: str) -> list[str]:
     return [sys.executable, "-m", "navid.child", str(os.getpid()), *command]
 
 
+def worker_progress(worker: dict, run_id: str) -> str:
+    if worker.get("run_id") != run_id:
+        return "starting"
+    phase = worker.get("phase", "starting")
+    run = config.read_json(config.RUNTIME / "last-run.json")
+    if phase != "loading" or run.get("run_id") != run_id:
+        return phase
+    try:
+        with (config.RUNTIME / "worker.log").open("rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            offset = run.get("log_offsets", {}).get("worker.log", 0)
+            if offset > size:
+                return phase
+            stream.seek(max(offset, size - 1024 * 1024))
+            lines = stream.read().decode(errors="replace").splitlines()
+        markers = ("Loading model on GPU rank ", "Loaded model on GPU rank ",
+                   "All GPU model copies loaded;")
+        for line in reversed(lines):
+            if line.startswith(markers):
+                return f"{phase}; latest progress: {line}"
+    except OSError:
+        pass
+    return phase
+
+
 def status() -> int:
     info = running()
     if not info:
@@ -67,7 +92,7 @@ def status() -> int:
         return 0 if value.get("ready") else 1
     except (urllib.error.URLError, ValueError):
         worker = config.read_json(config.RUNTIME / "worker.json")
-        print(f"Service PID {info['pid']} is starting/unhealthy: {worker.get('phase', 'starting')}")
+        print(f"Service PID {info['pid']} is starting/unhealthy: {worker_progress(worker, info['run_id'])}")
         return 1
 
 
@@ -195,7 +220,8 @@ def start() -> int:
         child = subprocess.Popen([sys.executable, "-m", "navid.service", "serve"], cwd=config.ROOT,
                                  stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
                                  env={**os.environ, "NAVID_RUN_ID": run_id})
-    deadline = time.monotonic() + int(os.environ.get("READY_TIMEOUT", "7200")) + 30
+    wait_started = time.monotonic()
+    deadline = wait_started + int(os.environ.get("READY_TIMEOUT", "7200")) + 30
     last_notice = 0
     try:
         while time.monotonic() < deadline:
@@ -210,7 +236,9 @@ def start() -> int:
                 print(f"Startup sample: {config.RUNTIME / 'warmup.mp4'}")
                 return 0
             if time.monotonic() - last_notice >= 30:
-                print(f"Waiting for eight-GPU Ref2VA validation: {worker.get('phase', 'starting')} (./deploy.sh logs)", flush=True)
+                elapsed = int(time.monotonic() - wait_started)
+                print(f"Waiting for eight-GPU Ref2VA validation: {worker_progress(worker, run_id)}; "
+                      f"waited={elapsed}s (./deploy.sh logs)", flush=True)
                 last_notice = time.monotonic()
             time.sleep(1)
         raise RuntimeError("Timed out waiting for readiness")
