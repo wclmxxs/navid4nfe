@@ -14,7 +14,8 @@ from .store import Store
 
 def state(phase: str, **extra) -> None:
     config.atomic_json(config.RUNTIME / "worker.json",
-                       {"run_id": config.RUN_ID, "phase": phase, "since": time.time(), **extra})
+                       {"run_id": config.RUN_ID, "phase": phase, "since": time.time(),
+                        "profile": config.PROFILE.metadata(), **extra})
 
 
 def main() -> None:
@@ -22,7 +23,6 @@ def main() -> None:
     import torch.distributed as dist
     from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3Reference
     from h3_runtime import MiniMaxH3Inference
-    from h3_runtime.engine import INFERENCE_STEPS
     from PIL import Image, ImageDraw
 
     from .h200 import configure
@@ -34,8 +34,6 @@ def main() -> None:
     torch.cuda.set_device(rank)
     if torch.cuda.get_device_capability(rank) != (9, 0) or "H200" not in torch.cuda.get_device_name(rank):
         raise RuntimeError("This deployment profile requires NVIDIA H200 (SM90)")
-    if INFERENCE_STEPS != 5:
-        raise RuntimeError("Expected five scheduler points / four DiT forwards")
     dist.init_process_group("nccl", device_id=torch.device("cuda", rank),
                             timeout=timedelta(seconds=int(os.environ.get("TASK_TIMEOUT", "1800"))))
     configure()
@@ -54,19 +52,20 @@ def main() -> None:
         print(f"MODEL_LOAD_PLAN: {plan}; DIT_COMPILE={int(dit_compile_enabled())}; "
               f"VAE_COMPILE={int(vae_compile_enabled())}", flush=True)
         print(f"OPTIMIZATION_DEFAULTS: {optimization_defaults()}", flush=True)
+        print(f"REF2VA_PROFILE: {config.PROFILE.metadata()}", flush=True)
         state("loading", load_plan=plan)
 
     engine = MiniMaxH3Inference(str(config.MODEL), config.ADAPTER, attention_backend="dense",
                                task="ref2va", compute_quant="none", reference_image_resize_mode="match",
                                before_gpu_load=lambda index: check_gpu_memory(torch.cuda, [index]),
-                               load_parallelism=plan["parallelism"])
+                               load_parallelism=plan["parallelism"], inference_nfe=config.PROFILE.nfe)
 
     from .runtime import RequestRuntime
 
     RequestRuntime(engine)
 
     # Smoke test the same Ref2VA path as production, including reference encoding,
-    # four actual DiT calls, eight-rank communication, VAE and MP4/audio encoding.
+    # actual DiT call count, eight-rank communication, VAE and MP4/audio encoding.
     smoke_image = config.RUNTIME / "warmup-reference.png"
     if rank == 0:
         image = Image.new("RGB", (768, 768), "#d7e4ec")
@@ -89,14 +88,15 @@ def main() -> None:
     hook.remove()
     counts = [None] * 8
     dist.all_gather_object(counts, calls[0])
-    if counts != [4] * 8:
-        raise RuntimeError(f"Four-step verification failed: per-rank DiT calls={counts}")
+    if counts != [config.PROFILE.nfe] * 8:
+        raise RuntimeError(f"{config.PROFILE.nfe}-step verification failed: per-rank DiT calls={counts}")
     if rank == 0:
         smoke_output = config.RUNTIME / "warmup.mp4"
+        media.metadata["profile"] = config.PROFILE.metadata()
         media.save(smoke_output)
         verify_output(smoke_output, expected_frames=120)
         config.atomic_json(config.RUNTIME / "warmup-metrics.json", media.metadata)
-        print(f"WARMUP_OK: 8 x H200; Ref2VA; DiT calls={counts}; MP4 video+audio", flush=True)
+        print(f"WARMUP_OK: 8 x H200; Ref2VA {config.PROFILE.nfe} NFE; DiT calls={counts}; MP4 video+audio", flush=True)
     del media
     dist.barrier()
     if rank == 0:
@@ -121,8 +121,10 @@ def main() -> None:
         output = config.DATA / "outputs" / f"{job['id']}.mp4"
         temporary = output.with_suffix(".partial.mp4")
         try:
-            references = [MiniMaxH3Reference(**{r["kind"]: r["path"]}) for r in job["references"]]
             execution = job["execution"]
+            if execution.get("profile") != config.PROFILE.metadata():
+                raise RequestRejected("Queued task profile does not match the loaded adapter; resubmit the task")
+            references = [MiniMaxH3Reference(**{r["kind"]: r["path"]}) for r in job["references"]]
             width, height = execution["inference_size"]
             media = engine.generate(job["prompt"], duration=job["duration"], seed=job["seed"], references=references,
                                     width=width, height=height, output_size=execution["output_size"],
@@ -130,6 +132,7 @@ def main() -> None:
                                     reference_allow_upscale=job.get("reference_allow_upscale", False),
                                     optimization=execution["optimization"])
             if rank == 0:
+                media.metadata["profile"] = config.PROFILE.metadata()
                 media.save(temporary)
                 verify_output(temporary, expected_frames=execution["output_frames"],
                               expected_size=execution["output_size"], expected_duration=job["duration"])

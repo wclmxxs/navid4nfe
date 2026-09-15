@@ -1,4 +1,4 @@
-"""Hopper-specific options; four-step sampling and Ref2VA weights stay upstream."""
+"""Hopper-specific options for the selected Ref2VA sampling profile."""
 from __future__ import annotations
 
 from .startup import vae_compile_enabled

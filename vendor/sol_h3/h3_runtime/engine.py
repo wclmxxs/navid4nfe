@@ -129,7 +129,11 @@ class MiniMaxH3Inference:
         compute_quant: str = "none",
         before_gpu_load: Callable[[int], None] | None = None,
         load_parallelism: int = 1,
+        inference_nfe: int = 4,
     ) -> None:
+        if type(inference_nfe) is not int or inference_nfe not in (4, 8):
+            raise ValueError("inference_nfe must be 4 or 8 with a matching adapter")
+        self.inference_nfe = inference_nfe
         self._owns_process_group = False
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
@@ -328,7 +332,8 @@ class MiniMaxH3Inference:
         for index, block in enumerate(self.transformer.transformer_blocks):
             table = getattr(block.adaln_proj, "table", None)
             schedules = 3 if self.task == "ref2va" else 2
-            if table is None or table.ndim != 4 or table.shape[0] != schedules:
+            if (table is None or table.ndim != 4 or table.shape[0] != schedules
+                    or table.shape[1] != self.inference_nfe):
                 raise RuntimeError(f"invalid AdaLN cache at transformer block {index}")
         self._adaln_checked = True
 
@@ -387,7 +392,7 @@ class MiniMaxH3Inference:
             "height": height,
             "width": width,
             "num_frames": DURATION_FRAMES[duration],
-            "num_inference_steps": INFERENCE_STEPS,
+            "num_inference_steps": self.inference_nfe + 1,
             "generator": torch.Generator().manual_seed(int(seed)),
             "output_type": "pt",
         }

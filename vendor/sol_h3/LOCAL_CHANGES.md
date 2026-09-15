@@ -27,6 +27,13 @@ extra rows from attention, DiT compilation (on by default; explicitly disable wi
 reuse (Fn=1/Bn=0). It does not select the Blackwell BSA/MXFP8 paths.
 
 Additional local changes:
+- `engine.py`: per-instance 4/8 NFE dispatch uses NFE+1 scheduler points and
+  validates the AdaLN table's step dimension. The deployment defaults to the
+  pinned LightX2V Ref2VA 8-step v1.0 768p adapter; the engine's standalone default
+  stays at four steps. `navid/profiles.py` pairs each adapter SHA256 with its
+  sampling configuration. Both use Euler, video/audio shift 12/3 and alpha 8,
+  following the author's Ref2VA release (HF discussion 51 for eight steps).
+  Switching profiles requires a fresh engine; no request mutates resident weights.
 - `engine.py`: integer 4..15-second native schedules, variable internal canvas,
   request reference short-edge resolver and metrics. Scheduler shifts and LoRA
   coefficients remain unchanged.

@@ -1,6 +1,8 @@
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from navid import config, service
 from navid.store import Store
 
@@ -75,3 +77,17 @@ def test_start_existing_service_does_not_check_its_occupied_gpus(monkeypatch):
 
     monkeypatch.setattr(service.subprocess, "run", unexpected)
     assert service.start() == 0
+
+
+def test_adapter_failure_prevents_workers_from_starting(monkeypatch):
+    monkeypatch.setattr(service, "running", lambda: None)
+    commands = []
+
+    def check(command, **kwargs):
+        commands.append(command[-1])
+        return SimpleNamespace(returncode=0 if command[-1] == "gpucheck" else 1)
+
+    monkeypatch.setattr(service.subprocess, "run", check)
+    monkeypatch.setattr(service.subprocess, "Popen", lambda *a, **kw: pytest.fail("Must not load a mismatched LoRA"))
+    assert service.start() == 1
+    assert commands == ["gpucheck", "ensure"]

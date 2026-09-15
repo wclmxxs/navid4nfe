@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--reference", type=Path, default=root / ".runtime/warmup-reference.png")
     parser.add_argument("--output", type=Path, default=root / "data/tuning-validation")
     parser.add_argument("--timeout", type=int, default=7200)
+    parser.add_argument("--nfe", type=int, choices=(4, 8), help="Assert the resident profile before submitting")
     args = parser.parse_args()
     key = os.environ.get("API_KEY") or (root / ".runtime/api.key").read_text().strip()
 
@@ -30,15 +31,21 @@ def main():
         except urllib.error.HTTPError as error:
             raise RuntimeError(f"HTTP {error.code}: {error.read().decode(errors='replace')}") from error
 
+    ready = json.loads(call("/readyz"))
+    nfe = ready["nfe"]
+    if args.nfe is not None and args.nfe != nfe:
+        raise ValueError(f"Expected NFE={args.nfe}; server has NFE={nfe}; switch REF2VA_NFE and restart")
+    # Separate four/eight-step artifacts so a later profile run cannot overwrite its baseline.
+    args.output = args.output / f"nfe{nfe}"
     reference = json.loads(call("/v1/references?kind=image", args.reference.read_bytes(),
                                 "application/octet-stream"))["id"]
     prompt = "A continuous realistic shot of the subject in Picture 1. The camera slowly moves closer. Natural ambient sound."
     cases = [
-        ("dense-8s-720", 8, 1280, 720, False, False),
-        ("sol-8s-720", 8, 1280, 720, True, False),
-        ("cache-8s-720", 8, 1280, 720, False, True),
-        ("both-8s-720", 8, 1280, 720, True, True),
-        ("dense-after-overrides", 8, 1280, 720, False, False),
+        ("dense-8s-768", 8, 1344, 768, False, False),
+        ("sol-8s-768", 8, 1344, 768, True, False),
+        ("cache-8s-768", 8, 1344, 768, False, True),
+        ("both-8s-768", 8, 1344, 768, True, True),
+        ("dense-after-overrides", 8, 1344, 768, False, False),
         ("portrait-4s-1080", 4, 1080, 1920, False, False),
         ("square-15s-512", 15, 512, 512, False, False),
     ]
@@ -46,8 +53,8 @@ def main():
     results = []
     for name, duration, width, height, sol, cache in cases:
         payload = {"prompt": prompt, "duration": duration, "width": width, "height": height,
-            "references": [reference], "seed": 42, "reference_short_edge": 512,
-            "optimization": {"sol_attn": {"enabled": sol, "tau": 1.0, "dense_steps": 1},
+            "references": [reference], "seed": 42, "reference_short_edge": 512, "nfe": nfe,
+            "optimization": {"sol_attn": {"enabled": sol, "tau": 1.5, "dense_steps": 1},
                              "cache_dit": {"enabled": cache, "rdt": 0.08}}}
         task = json.loads(call("/v1/videos", json.dumps(payload).encode()))
         print(f"{name}: {task['id']}", flush=True)
@@ -68,9 +75,14 @@ def main():
 
         verify_output(path, expected_frames=duration * 24, expected_size=(width, height), expected_duration=duration)
         metrics = result["metrics"]
+        assert result["nfe"] == metrics["nfe"] == nfe, result
+        assert result["execution"]["profile"] == ready["profile"], result
         assert (metrics["sol_attn"]["sparse_calls"] > 0) == sol, metrics
         if not cache:
             assert metrics["cache_dit"]["cached_steps"] == 0, metrics
+        else:
+            decisions = metrics["cache_dit"]["steps"]
+            assert len(decisions) == nfe and not decisions[0]["cached"] and not decisions[-1]["cached"], metrics
         assert metrics["compile"]["padded_tokens"] % 4096 == 0, metrics
         row = {"case": name, "inference_s": result["inference_s"], "metrics": metrics}
         results.append(row)

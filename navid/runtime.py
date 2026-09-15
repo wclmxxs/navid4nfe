@@ -103,7 +103,7 @@ class RequestRuntime:
 
         options = resolve_optimization(options)
         self.sol = options["sol_attn"]
-        self.cache.reset(options["cache_dit"])
+        self.cache.reset(options["cache_dit"], total_steps=self.engine.inference_nfe)
         self.duration = duration
         self.step = -1
         self.layer = 0
@@ -214,11 +214,14 @@ class RequestRuntime:
     def finish(self):
         import torch
 
+        if self.step + 1 != self.engine.inference_nfe:
+            raise RuntimeError(f"Expected {self.engine.inference_nfe} DiT forwards; observed {self.step + 1}")
         self.events[3].record()
         torch.cuda.synchronize(self.engine.device)
         self.seen_shapes.add(self.shape_key)
         new_compiles = self.compiles - self.compiles_before
         result = {
+            "nfe": self.step + 1,
             "sol_attn": {**self.sol, "backend": "triton_tma_sm90" if self.sparse_calls else "dense",
                          "sparse_calls": self.sparse_calls, "dense_calls": self.dense_calls,
                          "route_density_first_call_head0": self.density},

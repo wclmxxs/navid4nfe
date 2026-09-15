@@ -22,7 +22,8 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "store", Store(config.DATA))
     config.atomic_json(config.RUNTIME / "supervisor.json",
                        {"run_id": "test-run", "phase": "running", "heartbeat": time.time()})
-    config.atomic_json(config.RUNTIME / "worker.json", {"run_id": "test-run", "phase": "ready"})
+    config.atomic_json(config.RUNTIME / "worker.json", {"run_id": "test-run", "phase": "ready",
+                                                       "profile": config.PROFILE.metadata()})
     with TestClient(api.app, headers={"X-API-Key": "test-key"}) as client:
         yield api, client
 
@@ -59,7 +60,7 @@ def test_submit_query_and_download(api, monkeypatch):
     module.store.finish(job_id, output=str(output), inference_s=12.5)
     result = client.get(f"/v1/videos/{job_id}").json()
     assert result["status"] == "succeeded"
-    assert result["nfe"] == 4
+    assert result["nfe"] == config.PROFILE.nfe
     assert "output" not in result
     assert client.get(result["content_url"]).content == b"fixture-video"
 
@@ -143,3 +144,42 @@ def test_admission_rejects_excessive_combined_workload(api, monkeypatch):
     response = client.post("/v1/videos", json={"prompt": "p", "references": [ref], "duration": 15})
     assert response.status_code == 422
     assert "MAX_PACKED_TOKENS" in response.text
+
+
+@pytest.mark.parametrize("nfe", (4, 8))
+def test_profile_assertion_and_step_limits_before_queue(api, monkeypatch, nfe):
+    from navid.profiles import PROFILES
+
+    module, client = api
+    monkeypatch.setattr(config, "PROFILE", PROFILES[nfe])
+    config.atomic_json(config.RUNTIME / "worker.json", {"run_id": "test-run", "phase": "ready",
+                                                       "profile": config.PROFILE.metadata()})
+    ready = client.get("/readyz").json()
+    assert ready["ready"] and ready["nfe"] == nfe
+    ref = upload_image(client)
+    base = {"prompt": "p", "references": [ref]}
+    wrong = client.post("/v1/videos", json={**base, "nfe": 12 - nfe})
+    assert wrong.status_code == 422 and "restart" in wrong.text
+    for bad in (5, 6, 8.0, "8", True):
+        assert client.post("/v1/videos", json={**base, "nfe": bad}).status_code == 422
+    for group, field in (("sol_attn", "dense_steps"), ("cache_dit", "warmup")):
+        assert client.post("/v1/videos", json={**base, "optimization": {group: {field: nfe + 1}}}).status_code == 422
+    assert client.post("/v1/videos", json={**base, "optimization": {
+        "cache_dit": {"max_continuous_cached_steps": nfe - 1}}}).status_code == 422
+    assert module.store.claim() is None
+    response = client.post("/v1/videos", json={**base, "nfe": nfe,
+        "optimization": {"sol_attn": {"dense_steps": nfe}, "cache_dit": {"warmup": nfe}}})
+    assert response.status_code == 202, response.text
+    result = client.get(response.json()["status_url"]).json()
+    assert result["nfe"] == result["execution"]["nfe"] == nfe
+    assert result["execution"]["profile"] == ready["profile"]
+
+
+def test_readiness_rejects_worker_loaded_with_another_profile(api):
+    from navid.profiles import PROFILES
+
+    _, client = api
+    config.atomic_json(config.RUNTIME / "worker.json", {"run_id": "test-run", "phase": "ready",
+                                                       "profile": PROFILES[12 - config.PROFILE.nfe].metadata()})
+    result = client.get("/readyz")
+    assert result.status_code == 503 and not result.json()["profile_matches_worker"]

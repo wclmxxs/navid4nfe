@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -78,10 +79,45 @@ def validate_model(root: Path) -> None:
 
 def validate_adapter(path: Path) -> None:
     from safetensors import safe_open
+    profile = config.PROFILE
+    # The two adapters share tensor shapes. Structural validation alone cannot
+    # tell whether a renamed/custom-path file is the correct four/eight-step one.
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != profile.adapter_sha256:
+        raise RuntimeError(f"Adapter SHA256 mismatch for REF2VA_NFE={profile.nfe}: expected "
+                           f"{profile.adapter_name}. Remove a stale ADAPTER_PATH or select the "
+                           "matching REF2VA_NFE. The file has not been overwritten.")
     with safe_open(path, framework="pt", device="cpu") as weights:
         keys = list(weights.keys())
         if not keys or not any("lora_A" in k for k in keys) or any(k.endswith(".set_weight") for k in keys):
-            raise RuntimeError("Expected the LightX2V Ref2VA four-step BF16 LoRA")
+            raise RuntimeError(f"Expected the LightX2V Ref2VA {profile.nfe}-step BF16 LoRA")
+
+
+def ensure_adapter() -> None:
+    if not config.ADAPTER.is_file():
+        if os.environ.get("ADAPTER_PATH"):
+            raise RuntimeError(f"ADAPTER_PATH does not exist: {config.ADAPTER}")
+        from huggingface_hub import snapshot_download
+        print(f"Downloading pinned {config.PROFILE.nfe}-step Ref2VA LoRA: {config.ADAPTER_NAME}", flush=True)
+        snapshot_download("lightx2v/Minimax-h3-Turbo", revision=config.ADAPTER_REVISION,
+                          local_dir=config.ADAPTER.parent, allow_patterns=[config.ADAPTER_NAME])
+    validate_adapter(config.ADAPTER)
+
+
+def record_checkpoints() -> None:
+    config.atomic_json(config.RUNTIME / "checkpoints.json", {
+        "model": str(config.MODEL), "model_revision": config.MODEL_REVISION if not os.environ.get("MODEL_DIR") else "local",
+        "adapter": str(config.ADAPTER), "adapter_revision": config.ADAPTER_REVISION,
+        "profile": config.PROFILE.metadata()})
+
+
+def ensure() -> None:
+    """Start/restart: reuse the base, fetch only a missing selected adapter."""
+    validate_model(config.MODEL)
+    ensure_adapter()
+    record_checkpoints()
+    print(f"Verified Ref2VA {config.PROFILE.nfe} NFE adapter and checkpoint layout.", flush=True)
 
 
 def download() -> None:
@@ -93,14 +129,9 @@ def download() -> None:
                           local_dir=config.MODEL, max_workers=4,
                           allow_patterns=["model_index.json", "modular_model_index.json", "LICENSE"]
                           + [f"{name}/*" for name in COMPONENTS])
-    if not os.environ.get("ADAPTER_PATH"):
-        snapshot_download("lightx2v/Minimax-h3-Turbo", revision=config.ADAPTER_REVISION,
-                          local_dir=config.ADAPTER.parent, allow_patterns=[config.ADAPTER_NAME])
     validate_model(config.MODEL)
-    validate_adapter(config.ADAPTER)
-    config.atomic_json(config.RUNTIME / "checkpoints.json", {
-        "model": str(config.MODEL), "model_revision": config.MODEL_REVISION if not os.environ.get("MODEL_DIR") else "local",
-        "adapter": str(config.ADAPTER), "adapter_revision": config.ADAPTER_REVISION if not os.environ.get("ADAPTER_PATH") else "local"})
+    ensure_adapter()
+    record_checkpoints()
     print("Checkpoint layout and LoRA validation passed.", flush=True)
 
 
@@ -135,7 +166,7 @@ def preflight() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["download", "preflight", "gpucheck"])
+    parser.add_argument("action", choices=["download", "preflight", "gpucheck", "ensure"])
     args = parser.parse_args()
     config.initialize_dirs()
     globals()[args.action]()

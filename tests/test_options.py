@@ -55,7 +55,7 @@ def test_partial_optimization_defaults_and_request_isolation(monkeypatch):
     assert actual["cache_dit"]["enabled"] is False
     assert request().resolved_optimization()["sol_attn"]["enabled"] is True
     assert request().resolved_optimization()["cache_dit"]["enabled"] is True
-    for options in ({"sol_attn": {"dense_steps": 5}}, {"cache_dit": {"rdt": float("nan")}},
+    for options in ({"sol_attn": {"dense_steps": 9}}, {"cache_dit": {"rdt": float("nan")}},
                     {"cache_dit": {"warmup": 0}}, {"sol_attn": {"tau": -1}}):
         with pytest.raises(ValidationError):
             request(optimization=options)

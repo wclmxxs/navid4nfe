@@ -5,13 +5,15 @@ import os
 import tempfile
 from pathlib import Path
 
+from .profiles import ADAPTER_REVISION, configured_profile
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / ".runtime"
 DATA = Path(os.environ.get("DATA_DIR", ROOT / "data")).expanduser().resolve()
 CHECKPOINTS = Path(os.environ.get("CHECKPOINT_DIR", ROOT / "checkpoints")).expanduser().resolve()
 MODEL_REVISION = "42ed227ee7df40d41602854ae760620d6eb651fe"
-ADAPTER_REVISION = "3ec17a324ced54151364f24f8b5fb6bf7e26414f"
-ADAPTER_NAME = "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors"
+PROFILE = configured_profile()
+ADAPTER_NAME = PROFILE.adapter_name
 MODEL = Path(os.environ.get("MODEL_DIR", CHECKPOINTS / "MiniMax-H3")).expanduser().resolve()
 ADAPTER = Path(os.environ.get("ADAPTER_PATH", CHECKPOINTS / "Minimax-h3-Turbo" / ADAPTER_NAME)).expanduser().resolve()
 RUN_ID = os.environ.get("NAVID_RUN_ID", "")

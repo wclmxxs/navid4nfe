@@ -67,6 +67,28 @@ def test_cache_all_ranks_use_global_sums():
         assert cache.decisions[-1]["relative_change"] == 0.5
 
 
+@pytest.mark.parametrize("nfe", (4, 8))
+def test_cache_protects_final_step_for_each_profile_and_resets(nfe):
+    cache = ResidualCache()
+    cache.reset({"enabled": True, "warmup": 1, "rdt": 1,
+                 "max_continuous_cached_steps": nfe - 2}, total_steps=nfe)
+    for step in range(nfe):
+        before = torch.full((1, 4, 2), float(step))
+        after = before + 1
+        cache.probe(before, after, step, 4)
+        output = cache.finish_tail(after if cache.skip else after + 3)
+        torch.testing.assert_close(output, after + 3)
+    assert [d["cached"] for d in cache.decisions] == [False] + [True] * (nfe - 2) + [False]
+    assert cache.stats()["nfe"] == nfe
+    cache.reset({"enabled": True, "warmup": nfe, "rdt": 1,
+                 "max_continuous_cached_steps": 1}, total_steps=nfe)
+    for step in range(nfe):
+        x = torch.zeros(1, 4, 2)
+        cache.probe(x, x + 1, step, 4)
+        cache.finish_tail(x + 4)
+    assert not any(d["cached"] for d in cache.decisions)
+
+
 def test_disabled_compile_and_cache_execute_every_block(monkeypatch):
     from types import SimpleNamespace
 

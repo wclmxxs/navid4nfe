@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--reference", action="append", required=True, help="image:PATH, video:PATH or audio:PATH; repeat in order")
     parser.add_argument("--prompt", default="A continuous cinematic shot featuring the subject in Picture 1. Natural motion and ambient sound.")
     parser.add_argument("--duration", type=int, choices=range(4, 16), default=5)
+    parser.add_argument("--nfe", type=int, choices=(4, 8), help="Assert the server's resident profile")
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--reference-short-edge", type=int)
@@ -57,7 +58,7 @@ def main() -> None:
             optimization[group][field] = value
     payload = {"prompt": args.prompt, "duration": args.duration, "seed": args.seed, "references": refs,
                "optimization": optimization}
-    for name in ("width", "height", "reference_short_edge"):
+    for name in ("width", "height", "reference_short_edge", "nfe"):
         if getattr(args, name) is not None:
             payload[name] = getattr(args, name)
     job = json.loads(call("/v1/videos", json.dumps(payload).encode()))

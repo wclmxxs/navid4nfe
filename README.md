@@ -1,6 +1,6 @@
-# Navid 4 NFE：8× H200 一键部署 Ref2VA
+# Navid 4/8 NFE：8× H200 一键部署 Ref2VA
 
-常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA 四步 LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **24 FPS、带音频的 MP4**，默认 1344×768；支持 **4～15 整数秒、自定义横竖版分辨率、参考图短边、请求级 Sol attention / DiT 缓存**。默认启用 **Sol τ=1.5、DiT cache 和 DiT torch.compile**，VAE 编译关闭；Sol / DiT 序列容量固定按 4096 tokens 对齐。
+常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA Turbo**，支持四步和八步，**默认八步 v1.0 768p LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **24 FPS、带音频的 MP4**，默认 1344×768；支持 **4～15 整数秒、自定义横竖版分辨率、参考图短边、请求级 Sol attention / DiT 缓存**。默认启用 **Sol τ=1.5、DiT cache 和 DiT torch.compile**，VAE 编译关闭；Sol / DiT 序列容量固定按 4096 tokens 对齐。
 
 ## 启动：只执行一个脚本
 
@@ -15,9 +15,9 @@
 1. 检查 NVIDIA 驱动，必要时通过 apt 安装 GCC、Git、curl 等主机工具。
 2. 在本目录安装校验过 SHA256 的 uv、Python 3.12 和隔离的 `.venv`。
 3. 安装 PyTorch 2.10 / CUDA 12.8、Triton、固定提交的 Diffusers 等依赖。
-4. 下载固定版本的 `MiniMaxAI/MiniMax-H3` Ref2VA 分区及四步 LoRA；中断后再次执行会续传。
+4. 下载固定版本的 `MiniMaxAI/MiniMax-H3` Ref2VA 分区及所选档位的 LoRA，并校验 LoRA 的 SHA256；中断后再次执行会续传。
 5. 重新检查八卡空闲显存，后台启动独立 HTTP API 和一个 `torchrun` 八卡 worker。
-6. 在每张 H200 上执行 Sol/TMA 数值检查（包含 4096 桶边界、部分尾块），再按服务默认优化配置执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行 4 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
+6. 在每张 H200 上执行 Sol/TMA 数值检查（包含 4096 桶边界、部分尾块），再按服务默认优化配置执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行所选的 4 或 8 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
 
 首次执行需要联网下载依赖和大模型。模型加载默认按可用主机/容器内存自动选择 1 / 2 / 4 / 8 个 rank 并发；约 2 TB 空闲内存的主机可八卡同时加载。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
 
@@ -55,9 +55,23 @@ PORT=8000 CHECKPOINT_DIR=/data/models/navid4nfe DATA_DIR=/data/navid4nfe ./deplo
 
 如使用环境变量配置，后续命令也需使用同一组变量；长期配置建议放 `.env`。
 
+### 四步 / 八步档位
+
+| `.env` 配置 | 对应 LoRA | 采样配置 |
+| --- | --- | --- |
+| `REF2VA_NFE=8`（默认） | `minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors` | Euler，video/audio shift 12/3，9 个 scheduler 点、8 次 DiT 前向 |
+| `REF2VA_NFE=4` | `minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors` | Euler，video/audio shift 12/3，5 个 scheduler 点、4 次 DiT 前向 |
+
+修改 `.env` 的 `REF2VA_NFE` 后执行 `./deploy.sh restart`。`start/restart` 会自动下载缺失的所选 LoRA（约 1.38 GB），复用已有基模；已有正确 LoRA 则直接校验并复用。两档使用不同权重和 AdaLN 表，因此切换需要重启。请求可传 `nfe:8` 或 `nfe:4` 检查当前档位，不能在请求中切换权重；与当前档位不同会返回 422。
+
+升级后未设置 `REF2VA_NFE` 的部署会使用八步。如果旧 `.env` 显式设置了四步 `ADAPTER_PATH`，需删除该项让脚本自动选择，或改成八步文件；文件哈希与档位不符会在加载 GPU 权重前报错，保留原文件。`/readyz` 的 `nfe`、`profile` 以及 `.runtime/checkpoints.json` 记录实际档位和权重身份；API 与 worker 档位不一致时不会报告 ready。
+
+八步配置来自 [LightX2V 作者的 Ref2V 8-step v1.0 发布说明](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/51)。该版本发布范围为 768p；接口仍允许其他分辨率，效果需另行验证。八步是否改善人群音效，需要同素材、提示词、seed、尺寸下与四步对照试听，不能仅凭步数保证。
+
 默认启用 Sol、DiT cache 和 DiT 编译。升级已有部署时，将 `.env` 中相关项设为（只需修改一次，后续直接 start/restart）：
 
 ```bash
+REF2VA_NFE=8
 SOL_ATTN_ENABLED=1
 SOL_ATTN_TAU=1.5
 SOL_ATTN_DENSE_STEPS=1
@@ -69,7 +83,7 @@ VAE_COMPILE=0
 然后执行 `./deploy.sh restart`。一次性覆盖旧环境的等价命令：
 
 ```bash
-SOL_ATTN_ENABLED=1 SOL_ATTN_TAU=1.5 SOL_ATTN_DENSE_STEPS=1 \
+REF2VA_NFE=8 SOL_ATTN_ENABLED=1 SOL_ATTN_TAU=1.5 SOL_ATTN_DENSE_STEPS=1 \
 CACHE_DIT_ENABLED=1 DIT_COMPILE=1 VAE_COMPILE=0 ./deploy.sh restart
 ```
 
@@ -77,7 +91,7 @@ CACHE_DIT_ENABLED=1 DIT_COMPILE=1 VAE_COMPILE=0 ./deploy.sh restart
 
 ```bash
 MODEL_DIR=/data/models/MiniMax-H3 \
-ADAPTER_PATH=/data/models/minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors \
+ADAPTER_PATH=/data/models/minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors \
 ./deploy.sh
 ```
 
@@ -106,7 +120,7 @@ curl --fail -X POST 'http://127.0.0.1:8000/v1/references?kind=image' \
 
 `kind` 支持 `image`、`video`、`audio`。音频参考必须搭配图片或视频。默认每文件最大 64 MiB；图片最长边 ≤8192，视频最长边 ≤2048，宽高比均为 1:4～4:1，参考音视频长度 ≤15 秒。图片由引擎按 `match` 规则缩放。
 
-### 2. 提交四步 Ref2VA 任务
+### 2. 提交 Ref2VA 任务
 
 把上传返回的 ID 按希望模型读取的顺序放入 `references`：
 
@@ -122,7 +136,7 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
   }'
 ```
 
-返回 HTTP 202 和任务 `id`。最多 9 张图片、3 段视频、3 段音频，总计最多 12 个参考素材。固定四步，无请求级 steps / LoRA 切换。`duration` 接受 4～15 整数，省略 `seed` 时生成随机 seed，查询结果会返回实际 seed。
+返回 HTTP 202 和任务 `id`。最多 9 张图片、3 段视频、3 段音频，总计最多 12 个参考素材。省略 `nfe` 使用服务当前档位（默认八步）；显式 `nfe` 仅校验档位。`duration` 接受 4～15 整数，省略 `seed` 时生成随机 seed，查询结果会返回实际 seed。
 
 ### 可选调优参数
 
@@ -161,17 +175,17 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
 | `resolution` / `ratio` | 可替代 width/height；resolution 为短边（128～2048 偶数），ratio 支持 16:9、9:16、1:1、4:3、3:4、21:9、9:21。两组参数不能混用。 |
 | `sol_attn.enabled` | `false` 为 Dense，`true` 使用 H200 的 `triton_tma_sm90` Sol 稀疏注意力。不会静默切换 CuTe/BSA 后端。 |
 | `sol_attn.tau` | `(0,10]`，越大通常越稀疏，质量损失可能越大；当前默认 1.5。 |
-| `sol_attn.dense_steps` | 0～4，前多少个采样步使用 Dense；4 相当于全程 Dense。 |
+| `sol_attn.dense_steps` | 0～当前 NFE，前多少个采样步使用 Dense；等于当前 NFE 时全程 Dense。 |
 | `sol_attn.sink_conditioning` | `exact_kv`：保留全部 text/reference/audio 前缀 KV；`exact_kv_and_rows`：同时精确计算前缀 query；`off`：不保护前缀。KV 保护边界向外对齐 64。 |
 | `sol_attn.dense_prefix_seconds` | 0～15，目标视频开头对应的 latent 帧使用 Dense query，边界向上取整到 latent 帧；覆盖整段时全程 Dense。 |
 | `cache_dit.enabled` | 开关跨步残差缓存；本地实现 Cache-DiT 的 DBCache/Fn=1、Bn=0 策略，非额外安装官方 cache-dit 包。 |
-| `cache_dit.warmup` | 1～4，前多少个采样步全算；最后一个采样步始终全算。 |
+| `cache_dit.warmup` | 1～当前 NFE，前多少个采样步全算；最后一个采样步始终全算。 |
 | `cache_dit.rdt` | `[0,1]`，累计相对 L1 变化阈值，越高越容易复用；0 不命中。0.08 为保守起始值，四步模型可能一次都不命中。 |
-| `cache_dit.max_continuous_cached_steps` | 1～2，允许连续复用的中间步数。每步仍计算第一个探测 block，最多复用中间两步的剩余 blocks。 |
+| `cache_dit.max_continuous_cached_steps` | 四步档 1～2，八步档 1～6，默认均为 1；允许连续复用的中间步数，每步仍计算第一个探测 block。 |
 
 省略的调优字段继承 `.env` 默认值，显式 `enabled:false` 可以关闭。每个任务重新初始化缓存与配置，八卡通过全局归约决定是否复用，前一任务不会污染下一任务。参考算法：[Cache-DiT DBCache](https://github.com/vipshop/cache-dit/blob/main/docs/user_guide/DBCACHE_DESIGN.md)。
 
-默认开启 Sol（τ=1.5、首步 Dense、`exact_kv_and_rows`）和 DiT 缓存（warmup=1、rdt=0.08、连续复用上限=1）；启动预热与省略参数的请求使用同一配置。显式请求可分别关闭 Sol 或缓存用于对照。缓存开启不代表每个任务都会命中；四步模型的首步和末步始终全算。开启优化并不保证加速；需要观察实际 sparse calls、缓存命中和画质。H200 当前选择已有的 Sol Triton/TMA 路径并增加 runtime length 支持，没有直接套用仅支持 SM100/103 的 CuTe 编译桶。
+默认开启 Sol（τ=1.5、首步 Dense、`exact_kv_and_rows`）和 DiT 缓存（warmup=1、rdt=0.08、连续复用上限=1）；启动预热与省略参数的请求使用同一配置。显式请求可分别关闭 Sol 或缓存用于对照。缓存开启不代表每个任务都会命中；两档的首步和末步始终全算。开启优化并不保证加速；需要观察实际 sparse calls、缓存命中和画质。H200 当前选择已有的 Sol Triton/TMA 路径并增加 runtime length 支持，没有直接套用仅支持 SM100/103 的 CuTe 编译桶。
 
 ### 编译与资源上限
 
@@ -194,7 +208,7 @@ curl --fail -H "X-API-Key: $API_KEY" \
   http://127.0.0.1:8000/v1/videos/任务ID/content -o result.mp4
 ```
 
-任务状态：`queued → running → succeeded / failed`。成功后才允许下载，查询返回 `execution`（解析后的配置）、`metrics`（参考图尺寸、Sol 实际后端/调用数/首个调用 head0 的路由密度、DiT 缓存命中、编译及阶段耗时）。`nfe:4` 仍指四个采样前向，缓存会减少内部 block 计算。`inference_s` 是 GPU pipeline 时间，不含输出尺寸调整、MP4 编码、上传下载；`started/finished` 包含整个任务执行。GPU 阶段计时含首次编译等待，conditioning 包含参考图和文本编码。
+任务状态：`queued → running → succeeded / failed`。成功后才允许下载，查询返回 `execution`（解析后的配置和权重档位）、`metrics`（参考图尺寸、Sol 实际后端/调用数/首个调用 head0 的路由密度、DiT 缓存命中、编译及阶段耗时）。`nfe` 指四个或八个采样前向，缓存会减少内部 block 计算；历史任务保留原有 NFE，不随服务切档改变。`inference_s` 是 GPU pipeline 时间，不含输出尺寸调整、MP4 编码、上传下载；`started/finished` 包含整个任务执行。GPU 阶段计时含首次编译等待，conditioning 包含参考图和文本编码。
 
 默认最多容纳 32 个未完成任务，满队列返回 429；未就绪返回 503；无效素材或参数返回 422。CUDA/NCCL 故障或任务超过 `TASK_TIMEOUT` 会关闭 API 和全部 GPU 进程，并将未完成任务标记为失败。通过日志定位问题后执行 `./deploy.sh start`。
 
@@ -209,7 +223,7 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 只用图片时省略音频参数。该脚本依次上传、提交、等待并下载结果；从其他机器调用时传入 `--url http://<机器IP>:8000` 和 `API_KEY` 环境变量。省略优化开关时继承服务默认值；`--no-sol`、`--no-cache-dit` 可显式关闭。可添加 `--duration 8 --width 768 --height 1366 --reference-short-edge 512 --sol --tau 1.5 --no-cache-dit`，脚本会保存 MP4 和同名 JSON 指标。
 
-模型服务就绪后执行 `./deploy.sh verify`：使用同一素材/提示词/seed 比较 Dense、Sol、Cache、两者同时开启，然后再次关闭优化；另测 4 秒竖版 1080p、15 秒正方形 512。结果写入 `data/tuning-validation/`。可用 `.venv/bin/python scripts/verify_tuning.py --reference subject.png` 指定真人参考；脚本验证媒体格式/时长和优化是否执行，身份、动作、音频质量需要观看视频评估。
+模型服务就绪后执行 `./deploy.sh verify`：使用同一素材/提示词/seed、1344×768 比较 Dense、Sol 1.5、Cache、两者同时开启，然后再次关闭优化；另测 4 秒竖版 1080p、15 秒正方形 512。结果按当前档位写入 `data/tuning-validation/nfe4/` 或 `nfe8/`。可用 `.venv/bin/python scripts/verify_tuning.py --reference subject.png --nfe 8` 指定真人参考并校验档位；`smoke_test.py` 也支持 `--nfe`。脚本验证媒体格式/时长、实际 NFE 和优化是否执行，身份、动作、音频质量需要观看视频评估。
 
 ## 日常操作
 
@@ -246,14 +260,14 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 ## H200 配置与验证边界
 
-- 使用专用 `minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors`，不是 FastH3 的 T2VA adapter。
-- **五个 scheduler 点对应四次 DiT 前向**。保留上游 Ref2VA 的 video/audio shift `12 / 3`、LoRA alpha `8`、AdaLN 预计算、融合算子和八卡 Ulysses。
+- 使用所选档位的专用 Ref2VA 四步 v0.1 / 八步 v1.0 768p LoRA，固定文件 SHA256，禁止与 FL2VA / T2VA adapter 混用。
+- **五个 / 九个 scheduler 点对应四次 / 八次 DiT 前向**。两档采用 video/audio shift `12 / 3`、LoRA alpha `8`，保留 AdaLN 预计算、融合算子和八卡 Ulysses；AdaLN 表长度必须匹配当前 NFE。
 - 默认 **Sol attention（τ=1.5）+ BF16 计算/通信**，首步仍为 Dense；默认启用 DiT cache / DiT 编译，关闭 VAE 编译。官方 B300 的 SOL/BSA、INT8 通信和 MXFP8 配置不直接作为 H200 默认配置，因此不能套用官网的 B300 耗时。
 - VAE 使用按 clip 的八卡 tile 并行，默认关闭 `torch.compile`，可通过 `VAE_COMPILE=1` 开启并重新验收。
 - 根据 2026-09-15 目标机器返回的 `READY` 日志，**8× H200 已通过内置 5 秒、单张图片 Ref2VA 启动预热**：每卡执行四次 DiT 前向，生成的视频和音频可解码，HTTP 就绪检查通过。开发环境另验证了接口、任务队列、进程失败清理及依赖解析。
 - 2026-09-15 的实机单图、5 秒 HTTP 任务已完成上传、提交、查询及下载验证。下载后的 MP4 完整解码通过：1344×768、24 FPS、124 帧、H.264 视频和 32 kHz AAC 音轨。该次预热后任务的 `inference_s` 为 5.973 秒，任务执行时间为 6.916 秒（不含客户端上传、下载）；这是单次观测，不是通用性能基准。
 - 2026-09-15 另已完成 33 条 768×1366、8–15 秒的 Ref2VA 实机任务，使用 Sol τ=1.5、DiT cache 关闭、DiT 编译开启；视频和音频解码通过。该批结果的 DiT cache 未开启，不能作为本次默认缓存配置的性能或质量依据。
-- 以上实机记录不代表当前 Sol + DiT cache 默认组合已在 GPU 上重新验收。本次变更本地 CPU 测试通过，新增 GPU 数值检查将在目标机启动时执行；用 `./deploy.sh verify` 做端到端验收。多参考、视频输入、音频输入仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
+- 以上实机记录均为四步，八步档及其 Sol + DiT cache 默认组合尚未在目标 GPU 上验收。本地测试覆盖两档调度器、缓存步数、档位校验和历史记录；目标机启动会执行真实八卡预热，再用 `./deploy.sh verify` 做端到端验收。多参考、视频输入、音频输入仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
 
 ## 音频质量排查
 
@@ -261,7 +275,7 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 人群场景应明确声音层次：远处低音量人群底噪、少量短促欢呼、近处清楚的脚步/快门声，避免同时要求持续大声欢呼、多人对白、广播、引擎和交响乐。H3 提示词可分别用 `overall_soundscape` 与 `non_diegetic_music` 描述环境音和配乐，参见[官方 Ref2VA 提示词指南](https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt)。修改提示词仍需试听验证，不能把嘈杂直接认定为削波或稀疏注意力问题。
 
-定位时固定素材、提示词、seed、尺寸和时长，先显式关闭 `cache_dit.enabled`，比较 `sol_attn.enabled=false` 与 Sol 1.5，再单独改声音提示词。当前 `exact_kv_and_rows` 会对音频前缀执行 Dense query，但音视频共用 Transformer，视频侧近似仍可能间接影响声音。当前 Ref2VA Turbo v0.1 的[作者推荐配置](https://github.com/ModelTC/Minimax-H3-Turbo#1-model-specs)是四次前向、video/audio shift 12/3；不要直接混用 FL2VA 的八步权重或未经验证地改采样步数。
+定位时固定素材、提示词、seed、尺寸和时长，先显式关闭 `cache_dit.enabled`，比较 `sol_attn.enabled=false` 与 Sol 1.5，再单独改声音提示词。当前 `exact_kv_and_rows` 会对音频前缀执行 Dense query，但音视频共用 Transformer，视频侧近似仍可能间接影响声音。比较四步 / 八步时通过 `REF2VA_NFE` 切换对应 LoRA 并重启，使用完全相同的请求输入；两档均使用 video/audio shift 12/3。不要混用 FL2VA 八步权重或 FL2VA 768p 的 video shift 6。
 
 ## 固定来源
 
@@ -275,4 +289,4 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 来源：[Sol-H3](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3/Sol-H3)、[LightX2V LoRA](https://huggingface.co/lightx2v/Minimax-h3-Turbo)、[PyTorch CUDA 12.8 安装说明](https://pytorch.org/get-started/previous-versions/#v2100)。上游原始文件哈希和本地改动说明位于 `vendor/sol_h3/`。
 
-本地 CPU 测试：安装 `fastapi`、`httpx`、`Pillow`、`numpy`、`av`、`torch` 和 `pytest` 后执行 `python -m pytest -q tests`。`requirements.lock` 锁定了 Linux x86_64 / Python 3.12 的 74 个运行时依赖；修改版本时应同步重新解析该文件。
+本地 CPU 测试：安装 `fastapi`、`httpx`、`Pillow`、`numpy`、`av`、`torch`、`safetensors`、`huggingface_hub`、上述固定版本的 Diffusers 和 `pytest` 后执行 `python -m pytest -q tests`。`requirements.lock` 锁定了 Linux x86_64 / Python 3.12 的 74 个运行时依赖；本次档位切换无需修改依赖。

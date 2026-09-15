@@ -206,6 +206,11 @@ def start() -> int:
     result = subprocess.run([sys.executable, "-m", "navid.prepare", "gpucheck"], cwd=config.ROOT, check=False)
     if result.returncode:
         return result.returncode
+    # Profile changes on start/restart must fetch and validate the selected
+    # LoRA before spawning CUDA workers; base weights and dependencies are reused.
+    result = subprocess.run([sys.executable, "-m", "navid.prepare", "ensure"], cwd=config.ROOT, check=False)
+    if result.returncode:
+        return result.returncode
     key_path = config.RUNTIME / "api.key"
     try:
         with key_path.open("x") as stream:

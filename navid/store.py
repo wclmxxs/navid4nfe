@@ -95,7 +95,10 @@ class Store:
             return None
         item = dict(row)
         payload = json.loads(item.pop("payload"))
-        item.update(duration=payload["duration"], seed=payload["seed"], task="ref2va", nfe=4)
+        # Jobs from before profile support were always four-step. Never infer
+        # historical NFE from the current process configuration after a restart.
+        nfe = (payload.get("execution") or {}).get("nfe", 4)
+        item.update(duration=payload["duration"], seed=payload["seed"], task="ref2va", nfe=nfe)
         item["execution"] = payload.get("execution")
         item["metrics"] = json.loads(item["metrics"]) if item.get("metrics") else None
         return item

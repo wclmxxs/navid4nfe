@@ -11,7 +11,7 @@ case "$action" in
 Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|check|verify]
   deploy   Default: install a private Python/CUDA environment, download pinned
            Ref2VA weights, start the API + eight GPU ranks, wait for real warmup.
-  start    Start an already installed deployment and wait for readiness.
+  start    Reuse the environment; fetch a missing selected LoRA, start and wait.
   stop     Stop the API and all eight GPU workers.
   restart  Stop and start with the current code/configuration; reuse dependencies.
   status   Return 0 only when the model service is ready.
@@ -32,7 +32,7 @@ esac
 [[ $(uname -s) == Linux ]] || { echo "Deployment requires a Linux H200 host." >&2; exit 1; }
 
 # Preserve explicit shell overrides when loading optional .env configuration.
-keys=(HOST PORT CUDA_VISIBLE_DEVICES HF_TOKEN HF_ENDPOINT DATA_DIR CHECKPOINT_DIR MODEL_DIR ADAPTER_PATH
+keys=(HOST PORT CUDA_VISIBLE_DEVICES HF_TOKEN HF_ENDPOINT DATA_DIR CHECKPOINT_DIR MODEL_DIR ADAPTER_PATH REF2VA_NFE
       READY_TIMEOUT TASK_TIMEOUT MAX_QUEUE MAX_UPLOAD_MB VAE_COMPILE DIT_COMPILE MODEL_LOAD_PARALLELISM
       SOL_ATTN_ENABLED SOL_ATTN_TAU SOL_ATTN_DENSE_STEPS CACHE_DIT_ENABLED CACHE_DIT_WARMUP
       CACHE_DIT_RDT CACHE_DIT_MAX_CONTINUOUS MAX_OUTPUT_PIXELS MAX_PACKED_TOKENS)

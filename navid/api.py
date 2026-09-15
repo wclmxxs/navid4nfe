@@ -20,7 +20,7 @@ from .store import QueueFull, Store
 
 config.initialize_dirs()
 store = Store(config.DATA)
-app = FastAPI(title="Navid 4 NFE · H200 Ref2VA", version="2.0.0")
+app = FastAPI(title="Navid · H200 Ref2VA 4/8 NFE", version="3.0.0")
 upload_slots = asyncio.Semaphore(2)
 
 
@@ -31,9 +31,15 @@ def health() -> tuple[bool, dict]:
              and supervisor.get("phase") == "running"
              and time.time() - supervisor.get("heartbeat", 0) < 10)
     ready = alive and worker.get("run_id") == config.RUN_ID and worker.get("phase") in {"ready", "busy"}
+    profile = config.PROFILE.metadata()
+    matching_profile = worker.get("profile") == profile
+    ready = ready and matching_profile
     return ready, {"ready": ready, "phase": worker.get("phase", "starting") if alive else "unavailable",
-                   "task": "ref2va", "nfe": 4, "gpus": 8, "attention": "request_configurable", "compute": "bf16",
+                   "task": "ref2va", "nfe": config.PROFILE.nfe, "profile": profile,
+                   "profile_matches_worker": matching_profile,
+                   "gpus": 8, "attention": "request_configurable", "compute": "bf16",
                    "capabilities": {"duration": {"min": 4, "max": 15}, "compile_bucket": 4096,
+                                    "profiles": {"supported_nfe": [4, 8], "switch_requires_restart": True},
                                     "compilation": {"dit": dit_compile_enabled(), "vae": vae_compile_enabled()},
                                     "sol_backend": "triton_tma_sm90", "optimization_defaults": optimization_defaults()}}
 
@@ -99,11 +105,12 @@ def submit(payload: VideoRequest):
     if kinds.count("image") > 9 or kinds.count("video") > 3 or kinds.count("audio") > 3:
         raise HTTPException(422, "At most 9 images, 3 videos and 3 audio references")
     try:
+        execution = payload.execution()
         check_workload(payload, references)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     try:
-        job_id = store.enqueue({**payload.model_dump(), "references": references, "execution": payload.execution()},
+        job_id = store.enqueue({**payload.model_dump(), "references": references, "execution": execution},
                                int(os.environ.get("MAX_QUEUE", "32")))
     except QueueFull as error:
         raise HTTPException(429, "Queue is full", headers={"Retry-After": "10"}) from error

@@ -29,3 +29,16 @@ def test_late_completion_cannot_revive_failed_job(tmp_path):
     store.fail_pending("stopped")
     store.finish(job, output="late.mp4")
     assert store.get(job)["status"] == "failed"
+
+
+def test_job_nfe_is_persisted_and_legacy_records_stay_four_step(tmp_path, monkeypatch):
+    from navid import config
+    from navid.profiles import PROFILES
+
+    store = Store(tmp_path)
+    legacy = store.enqueue({"duration": 5, "seed": 0}, 10)
+    new = store.enqueue({"duration": 5, "seed": 0, "execution": {"nfe": 8}}, 10)
+    for nfe in (4, 8):
+        monkeypatch.setattr(config, "PROFILE", PROFILES[nfe])
+        assert store.get(legacy)["nfe"] == 4
+        assert store.get(new)["nfe"] == 8

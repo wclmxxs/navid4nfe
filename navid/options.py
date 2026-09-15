@@ -8,6 +8,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from . import config
+from .profiles import require_profile
+
 FPS = 24
 BUCKET = 4096
 
@@ -37,16 +40,16 @@ class StrictModel(BaseModel):
 class SolOptions(StrictModel):
     enabled: bool = True
     tau: float = Field(1.5, gt=0, le=10)
-    dense_steps: int = Field(1, ge=0, le=4, strict=True)
+    dense_steps: int = Field(1, ge=0, le=8, strict=True)
     sink_conditioning: Literal["exact_kv", "exact_kv_and_rows", "off"] = "exact_kv_and_rows"
     dense_prefix_seconds: float = Field(0.0, ge=0, le=15)
 
 
 class CacheOptions(StrictModel):
     enabled: bool = True
-    warmup: int = Field(1, ge=1, le=4, strict=True)
+    warmup: int = Field(1, ge=1, le=8, strict=True)
     rdt: float = Field(0.08, ge=0, le=1)
-    max_continuous_cached_steps: int = Field(1, ge=1, le=2, strict=True)
+    max_continuous_cached_steps: int = Field(1, ge=1, le=6, strict=True)
 
 
 class Optimization(StrictModel):
@@ -55,7 +58,7 @@ class Optimization(StrictModel):
 
 
 def optimization_defaults() -> dict:
-    return Optimization(
+    result = Optimization(
         sol_attn=SolOptions(enabled=os.environ.get("SOL_ATTN_ENABLED", "1") == "1",
                             tau=float(os.environ.get("SOL_ATTN_TAU", "1.5")),
                             dense_steps=int(os.environ.get("SOL_ATTN_DENSE_STEPS", "1"))),
@@ -64,13 +67,26 @@ def optimization_defaults() -> dict:
                                rdt=float(os.environ.get("CACHE_DIT_RDT", "0.08")),
                                max_continuous_cached_steps=int(os.environ.get("CACHE_DIT_MAX_CONTINUOUS", "1"))),
     ).model_dump()
+    validate_optimization_steps(result, config.PROFILE.nfe)
+    return result
+
+
+def validate_optimization_steps(options: dict, nfe: int) -> None:
+    if options["sol_attn"]["dense_steps"] > nfe:
+        raise ValueError(f"sol_attn.dense_steps cannot exceed active NFE={nfe}")
+    if options["cache_dit"]["warmup"] > nfe:
+        raise ValueError(f"cache_dit.warmup cannot exceed active NFE={nfe}")
+    if options["cache_dit"]["max_continuous_cached_steps"] > nfe - 2:
+        raise ValueError(f"cache_dit.max_continuous_cached_steps cannot exceed {nfe - 2} for NFE={nfe}")
 
 
 def resolve_optimization(overrides: dict | None = None) -> dict:
     result = optimization_defaults()
     for name, values in Optimization.model_validate(overrides or {}).model_dump(exclude_unset=True).items():
         result[name].update(values)
-    return Optimization.model_validate(result).model_dump()
+    result = Optimization.model_validate(result).model_dump()
+    validate_optimization_steps(result, config.PROFILE.nfe)
+    return result
 
 
 class VideoRequest(StrictModel):
@@ -78,6 +94,8 @@ class VideoRequest(StrictModel):
     duration: int = Field(5, ge=4, le=15, strict=True)
     seed: int = Field(default_factory=lambda: secrets.randbits(32), ge=0, le=2**63 - 1, strict=True)
     references: list[str] = Field(min_length=1, max_length=12)
+    nfe: int | None = Field(None, ge=4, le=8, multiple_of=4, strict=True,
+                            description="Optional assertion of the loaded 4/8-step profile; switching needs a restart")
     width: int | None = Field(None, ge=128, le=4096, multiple_of=2, strict=True)
     height: int | None = Field(None, ge=128, le=4096, multiple_of=2, strict=True)
     resolution: int | None = Field(None, ge=128, le=2048, multiple_of=2, strict=True)
@@ -118,7 +136,9 @@ class VideoRequest(StrictModel):
         return resolve_optimization(self.optimization.model_dump(exclude_unset=True))
 
     def execution(self) -> dict:
-        return {"output_size": list(self.output_size()), "inference_size": list(self.inference_size()),
+        require_profile(self.nfe, config.PROFILE)
+        return {"nfe": config.PROFILE.nfe, "profile": config.PROFILE.metadata(),
+                "output_size": list(self.output_size()), "inference_size": list(self.inference_size()),
                 "output_frames": self.duration * FPS, "native_frames": native_frames(self.duration),
                 "optimization": self.resolved_optimization(), "compile_bucket": BUCKET}
 
