@@ -22,7 +22,7 @@ Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|chec
   verify   Run live tuning A/B, duration and resolution checks; keep MP4 results.
 
 Target: Linux with 8 NVIDIA H200 GPUs and driver >=570.26.
-Optional configuration: .env (see .env.example); shell environment takes priority.
+Startup migrates .env defaults automatically with a backup; shell overrides win.
 No Docker or systemd required. Ctrl-C during startup cancels the new service.
 HELP
     exit 0 ;;
@@ -40,11 +40,31 @@ saved_keys=() saved_values=()
 for key in "${keys[@]}"; do
   if value=$(printenv "$key"); then saved_keys+=("$key"); saved_values+=("$value"); fi
 done
-if [[ -f .env ]]; then set -a; source .env; set +a; fi
-for index in "${!saved_keys[@]}"; do
-  printf -v "${saved_keys[$index]}" '%s' "${saved_values[$index]}"
-  export "${saved_keys[$index]}"
-done
+# Migrate before sourcing .env or importing runtime config. This helper only
+# needs the standard library and owns a separate lock for its atomic update.
+env_migrated=0
+migrate_env() {
+  "$1" "$ROOT/navid/env_migration.py" --root "$ROOT"
+  env_migrated=1
+}
+launch_action=0
+if [[ $action == deploy || $action == start || $action == restart ]]; then
+  launch_action=1
+  if [[ -x $ROOT/.venv/bin/python ]]; then
+    migrate_env "$ROOT/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    migrate_env python3
+  fi
+fi
+load_env() {
+  if [[ -f .env ]]; then set -a; source .env; set +a; fi
+  for index in "${!saved_keys[@]}"; do
+    printf -v "${saved_keys[$index]}" '%s' "${saved_values[$index]}"
+    export "${saved_keys[$index]}"
+  done
+}
+# On a fresh host without Python, defer this one load until uv installs Python.
+if [[ $launch_action == 0 || $env_migrated == 1 ]]; then load_env; fi
 
 mkdir -p .runtime
 export PYTHONPATH="$ROOT:$ROOT/vendor/sol_h3${PYTHONPATH:+:$PYTHONPATH}"
@@ -148,6 +168,11 @@ if [[ $action == deploy ]]; then
   fi
 elif [[ ! -x $PYTHON ]]; then
   echo "Run ./deploy.sh first to install the environment." >&2; exit 1
+fi
+
+if [[ $launch_action == 1 && $env_migrated == 0 ]]; then
+  migrate_env "$PYTHON"
+  load_env
 fi
 
 # Triton 3.6 may bundle a newer ptxas. Use CUDA 12.8 ptxas on R570 Hopper hosts.

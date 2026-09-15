@@ -47,13 +47,17 @@
 
 ### 配置与已有权重复用
 
-可选：复制 `.env.example` 为 `.env`，再调整端口、缓存路径等。环境变量优先于 `.env`。
+`deploy/start/restart` 自动创建或迁移 `.env`，无需手工复制示例或修正旧优化开关。本次配置版本自动设为八步、Sol 1.5、DiT cache 和 DiT 编译开启、VAE 编译关闭，并取消旧 `.env` 的 `ADAPTER_PATH` 覆盖，让权重跟随档位选择。端口、数据目录、基模目录、HF 凭据及其他配置原样保留。
+
+迁移前将原文件备份到 `.runtime/env-backups/`；备份和更新后的 `.env` 均为 `0600` 权限。脚本在 `.env` 底部追加一个优先于旧值的配置块并原子替换文件，避免破坏引号、多行值及凭据。**同一配置版本只迁移一次**，后续重启保留新调参；以后升级默认策略时增加迁移版本即可自动更新。`stop/status/logs/errors/check/verify/gpu-status` 不迁移配置。
+
+环境变量优先于 `.env`，可用于临时调试；`.env.example` 仅作配置参考：
 
 ```bash
 PORT=8000 CHECKPOINT_DIR=/data/models/navid4nfe DATA_DIR=/data/navid4nfe ./deploy.sh
 ```
 
-如使用环境变量配置，后续命令也需使用同一组变量；长期配置建议放 `.env`。
+如使用环境变量配置，后续命令也需使用同一组变量；长期调参可修改迁移后 `.env` 底部的配置块。
 
 ### 四步 / 八步档位
 
@@ -62,30 +66,11 @@ PORT=8000 CHECKPOINT_DIR=/data/models/navid4nfe DATA_DIR=/data/navid4nfe ./deplo
 | `REF2VA_NFE=8`（默认） | `minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors` | Euler，video/audio shift 12/3，9 个 scheduler 点、8 次 DiT 前向 |
 | `REF2VA_NFE=4` | `minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors` | Euler，video/audio shift 12/3，5 个 scheduler 点、4 次 DiT 前向 |
 
-修改 `.env` 的 `REF2VA_NFE` 后执行 `./deploy.sh restart`。`start/restart` 会自动下载缺失的所选 LoRA（约 1.38 GB），复用已有基模；已有正确 LoRA 则直接校验并复用。两档使用不同权重和 AdaLN 表，因此切换需要重启。请求可传 `nfe:8` 或 `nfe:4` 检查当前档位，不能在请求中切换权重；与当前档位不同会返回 422。
+升级时直接执行 `./deploy.sh restart`，自动应用八步默认配置。临时切回四步可执行 `REF2VA_NFE=4 ./deploy.sh restart`。`start/restart` 会自动下载缺失的所选 LoRA（约 1.38 GB），复用已有基模；已有正确 LoRA 则直接校验并复用。两档使用不同权重和 AdaLN 表，因此切换需要重启。请求可传 `nfe:8` 或 `nfe:4` 检查当前档位，不能在请求中切换权重；与当前档位不同会返回 422。
 
-升级后未设置 `REF2VA_NFE` 的部署会使用八步。如果旧 `.env` 显式设置了四步 `ADAPTER_PATH`，需删除该项让脚本自动选择，或改成八步文件；文件哈希与档位不符会在加载 GPU 权重前报错，保留原文件。`/readyz` 的 `nfe`、`profile` 以及 `.runtime/checkpoints.json` 记录实际档位和权重身份；API 与 worker 档位不一致时不会报告 ready。
+旧 `.env` 中的四步 `ADAPTER_PATH` 由迁移自动处理，无需手改；原权重文件保留。命令行显式传入的 `ADAPTER_PATH` 仍优先，文件哈希必须与所选档位匹配。`/readyz` 的 `nfe`、`profile` 以及 `.runtime/checkpoints.json` 记录实际档位和权重身份；API 与 worker 档位不一致时不会报告 ready。
 
 八步配置来自 [LightX2V 作者的 Ref2V 8-step v1.0 发布说明](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/51)。该版本发布范围为 768p；接口仍允许其他分辨率，效果需另行验证。八步是否改善人群音效，需要同素材、提示词、seed、尺寸下与四步对照试听，不能仅凭步数保证。
-
-默认启用 Sol、DiT cache 和 DiT 编译。升级已有部署时，将 `.env` 中相关项设为（只需修改一次，后续直接 start/restart）：
-
-```bash
-REF2VA_NFE=8
-SOL_ATTN_ENABLED=1
-SOL_ATTN_TAU=1.5
-SOL_ATTN_DENSE_STEPS=1
-CACHE_DIT_ENABLED=1
-DIT_COMPILE=1
-VAE_COMPILE=0
-```
-
-然后执行 `./deploy.sh restart`。一次性覆盖旧环境的等价命令：
-
-```bash
-REF2VA_NFE=8 SOL_ATTN_ENABLED=1 SOL_ATTN_TAU=1.5 SOL_ATTN_DENSE_STEPS=1 \
-CACHE_DIT_ENABLED=1 DIT_COMPILE=1 VAE_COMPILE=0 ./deploy.sh restart
-```
 
 已有权重时设置 `MODEL_DIR` 和 `ADAPTER_PATH`，脚本校验并直接复用：
 
@@ -192,7 +177,7 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
 - `DIT_COMPILE=1` **默认开启**，复用 PyTorch 编译图和 Inductor 磁盘缓存；`VAE_COMPILE=0` 默认关闭。显式设置 `DIT_COMPILE=0` 并重启即可使用 eager DiT，不影响请求级 Sol / DiT cache 开关。
 - packed sequence 始终向上对齐 **4096**，八卡分片均匀；额外行在注意力入口排除，不能作为 KV。提示词文本、seed、参考素材 ID 均不进入编译键。
 - Sol 的描述符容量和 autotune 按 4096 分桶，真实长度及 tau 是运行时参数。启用 `DIT_COMPILE=1` 时编译 DiT 数值部分，通信和注意力调度仍保留 eager。显式打开 VAE 编译时按实际 tile 形状编译，不能仅凭总 token 数复用。
-- 旧 `.env` 中的 `DIT_COMPILE=0`、`CACHE_DIT_ENABLED=0` 等显式值仍会覆盖新默认值。升级时将相关项改成上文配置；不要直接用示例覆盖整个 `.env`，以免丢失路径、端口或凭据。
+- 本次启动迁移会自动更新旧 `.env` 的 `DIT_COMPILE=0`、`CACHE_DIT_ENABLED=0` 等值。之后同版本重启保留后续调参；命令行显式设置仍优先。
 - Sol 使用 `.runtime/triton-cache`，DiT 编译使用 `.runtime/inductor-cache`，两者均跨重启保留。首次遇到新桶仍可能有编译/调优开销；已有磁盘缓存也不保证跳过新进程的全部图捕获和预热。
 - `/readyz` 的 `capabilities.compilation` 显示 DiT/VAE 编译开关；`capabilities.optimization_defaults` 显示 Sol 和 DiT cache 默认值。启动预热的实际指标保存到 `.runtime/warmup-metrics.json`。
 - `metrics.compile` 分别记录 `shape_seen`（过去成功执行过该形状）、`inductor_invocations`、`inductor_compile_s`、`graph_reused`；不把“见过形状”冒充底层磁盘编译缓存命中。PyTorch 调用编译后端的耗时可能包含磁盘缓存加载。
