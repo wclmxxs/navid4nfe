@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+from pathlib import Path
+
+from . import config
+
+COMPONENTS = ("audio_scheduler", "audio_vae", "processor", "scheduler", "text_encoder", "tokenizer", "vae", "transformer_ref")
+
+
+def validate_model(root: Path) -> None:
+    for name in ("modular_model_index.json", "model_index.json"):
+        json.loads((root / name).read_text())
+    for name in COMPONENTS:
+        directory = root / name
+        if not directory.is_dir() or not list(directory.glob("*.json")):
+            raise RuntimeError(f"Missing model component: {directory}")
+        if name in {"audio_vae", "text_encoder", "vae", "transformer_ref"}:
+            if not list(directory.glob("*.safetensors")):
+                raise RuntimeError(f"No safetensors weights in {directory}")
+            for index in directory.glob("*.safetensors.index.json"):
+                for shard in set(json.loads(index.read_text())["weight_map"].values()):
+                    path = (directory / shard).resolve()
+                    if not path.is_relative_to(directory.resolve()) or not path.is_file() or not path.stat().st_size:
+                        raise RuntimeError(f"Missing or invalid model shard: {path}")
+
+
+def validate_adapter(path: Path) -> None:
+    from safetensors import safe_open
+    with safe_open(path, framework="pt", device="cpu") as weights:
+        keys = list(weights.keys())
+        if not keys or not any("lora_A" in k for k in keys) or any(k.endswith(".set_weight") for k in keys):
+            raise RuntimeError("Expected the LightX2V Ref2VA four-step BF16 LoRA")
+
+
+def download() -> None:
+    from huggingface_hub import snapshot_download
+    config.CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+    if not os.environ.get("MODEL_DIR"):
+        print("Downloading pinned Ref2VA checkpoint; interrupted transfers resume on the next run.", flush=True)
+        snapshot_download("MiniMaxAI/MiniMax-H3", revision=config.MODEL_REVISION,
+                          local_dir=config.MODEL, max_workers=4,
+                          allow_patterns=["model_index.json", "modular_model_index.json", "LICENSE"]
+                          + [f"{name}/*" for name in COMPONENTS])
+    if not os.environ.get("ADAPTER_PATH"):
+        snapshot_download("lightx2v/Minimax-h3-Turbo", revision=config.ADAPTER_REVISION,
+                          local_dir=config.ADAPTER.parent, allow_patterns=[config.ADAPTER_NAME])
+    validate_model(config.MODEL)
+    validate_adapter(config.ADAPTER)
+    config.atomic_json(config.RUNTIME / "checkpoints.json", {
+        "model": str(config.MODEL), "model_revision": config.MODEL_REVISION if not os.environ.get("MODEL_DIR") else "local",
+        "adapter": str(config.ADAPTER), "adapter_revision": config.ADAPTER_REVISION if not os.environ.get("ADAPTER_PATH") else "local"})
+    print("Checkpoint layout and LoRA validation passed.", flush=True)
+
+
+def preflight() -> None:
+    import subprocess
+
+    import torch
+    import torch.nn.functional as F
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    if torch.__version__ != "2.10.0+cu128":
+        raise RuntimeError(f"Unexpected PyTorch build: {torch.__version__}")
+    if torch.cuda.device_count() != 8:
+        raise RuntimeError(f"Expected 8 visible GPUs, got {torch.cuda.device_count()}")
+    for i in range(8):
+        props = torch.cuda.get_device_properties(i)
+        if "H200" not in props.name or (props.major, props.minor) != (9, 0):
+            raise RuntimeError(f"GPU {i} must be H200 SM90, got {props.name}")
+        free, total = torch.cuda.mem_get_info(i)
+        if free < 125 * 1024**3:
+            raise RuntimeError(f"GPU {i} has only {free / 1024**3:.1f} GiB free; free GPU memory before starting")
+        print(f"GPU {i}: {props.name}, {free / 1024**3:.1f}/{total / 1024**3:.1f} GiB", flush=True)
+    # Require native CUDA 12.8 driver support: Triton compiles kernels at runtime.
+    version = subprocess.check_output(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], text=True).splitlines()[0]
+    if tuple(int(p) for p in version.split(".")[:2]) < (570, 26):
+        raise RuntimeError(f"Driver {version} is too old; install NVIDIA driver >=570.26 for this CUDA 12.8 profile")
+    torch.cuda.set_device(0)
+    q = torch.randn(1, 4, 128, 128, device="cuda", dtype=torch.bfloat16)
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        y = F.scaled_dot_product_attention(q, q, q)
+    if not torch.isfinite(y).all():
+        raise RuntimeError("Hopper flash SDPA smoke test failed")
+    from h3_runtime.fusions import fused_swiglu
+    x = torch.randn(8, 256, device="cuda", dtype=torch.bfloat16)
+    expected = x[:, :128] * F.silu(x[:, 128:])
+    torch.testing.assert_close(fused_swiglu(x), expected, rtol=0.02, atol=0.02)
+    torch.cuda.synchronize()
+    print("CUDA, native Flash SDPA and Triton kernel checks passed.", flush=True)
+    available = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    memory_gib = int(available["MemAvailable"].split()[0]) / 1024**2
+    if memory_gib < 160:
+        raise RuntimeError(f"At least 160 GiB available host RAM required; got {memory_gib:.1f} GiB")
+    print(f"Available host RAM: {memory_gib:.1f} GiB; ranks load sequentially.", flush=True)
+    config.CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+    print(f"Free checkpoint disk: {shutil.disk_usage(config.CHECKPOINTS).free / 1024**3:.1f} GiB", flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["download", "preflight"])
+    args = parser.parse_args()
+    config.initialize_dirs()
+    globals()[args.action]()
