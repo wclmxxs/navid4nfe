@@ -4,11 +4,11 @@ set -Eeuo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 action=${1:-deploy}
-if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|check]" >&2; exit 2; fi
+if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|errors|check]" >&2; exit 2; fi
 case "$action" in
   -h|--help|help)
     cat <<'HELP'
-Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|check]
+Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|check]
   deploy   Default: install a private Python/CUDA environment, download pinned
            Ref2VA weights, start the API + eight GPU ranks, wait for real warmup.
   start    Start an already installed deployment and wait for readiness.
@@ -16,6 +16,7 @@ Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|check]
   restart  Stop and start with the current code/configuration; reuse dependencies.
   status   Return 0 only when the model service is ready.
   logs     Follow supervisor, API and GPU logs.
+  errors   Show the original worker exception without loading the model again.
   check    Check the installed CUDA/kernel environment and checkpoint layout.
 
 Target: Linux with 8 NVIDIA H200 GPUs and driver >=570.26.
@@ -23,7 +24,7 @@ Optional configuration: .env (see .env.example); shell environment takes priorit
 No Docker or systemd required. Ctrl-C during startup cancels the new service.
 HELP
     exit 0 ;;
-  deploy|start|stop|restart|status|logs|check) ;;
+  deploy|start|stop|restart|status|logs|errors|check) ;;
   *) echo "Unknown action: $action (use --help)" >&2; exit 2 ;;
 esac
 [[ $(uname -s) == Linux ]] || { echo "Deployment requires a Linux H200 host." >&2; exit 1; }
@@ -64,7 +65,7 @@ if [[ $action == logs ]]; then
   touch .runtime/service.log .runtime/api.log .runtime/worker.log
   exec tail -n 60 -F .runtime/service.log .runtime/api.log .runtime/worker.log
 fi
-if [[ $action == stop || $action == status ]]; then
+if [[ $action == stop || $action == status || $action == errors ]]; then
   if [[ ! -x $PYTHON ]]; then echo "Not deployed yet."; [[ $action == stop ]]; exit; fi
   exec "$PYTHON" -m navid.service "$action"
 fi

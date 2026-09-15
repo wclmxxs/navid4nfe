@@ -58,3 +58,24 @@ def test_available_gpus_do_not_query_or_stop_processes(monkeypatch):
 
     monkeypatch.setattr(prepare.subprocess, "run", unexpected)
     prepare.check_gpus(GPUs([130] * 8))
+
+
+def test_late_check_detects_memory_taken_after_initial_preflight(monkeypatch):
+    inventories = []
+    monkeypatch.setattr(prepare, "print_gpu_processes", lambda: inventories.append(True))
+    cuda = GPUs([139.3] * 8)
+    prepare.check_gpus(cuda)
+    cuda.free_gib[0] = 96.2  # Another process used 43.1 GiB during the download.
+    with pytest.raises(RuntimeError, match="GPU 0 has only 96.2"):
+        prepare.check_gpus(cuda)
+    assert inventories == [True]
+
+
+def test_serial_load_check_ignores_weights_on_already_loaded_ranks(monkeypatch):
+    def unexpected():
+        raise AssertionError("Already loaded ranks should not fail the next rank's check")
+
+    monkeypatch.setattr(prepare, "print_gpu_processes", unexpected)
+    cuda = GPUs([5, 5, 139.3, 139.3, 139.3, 139.3, 139.3, 139.3])
+    prepare.check_gpu_memory(cuda, [2])
+    assert cuda.inspected == [2]

@@ -12,6 +12,9 @@ FlashAttention license are preserved verbatim. Model weights have their own term
 Local edit in `h3_runtime/engine.py`: load components and move them to CUDA on one
 rank at a time, with barriers around each rank. This reduces peak host RAM during
 startup. Sampling, LoRA fusion, scheduler shifts and model outputs are unchanged.
+An optional `before_gpu_load` callback rechecks the current rank's free GPU memory
+after CPU loading and immediately before the CUDA transfer. Loading logs include
+each rank's PID so other GPU processes can be distinguished from this worker.
 
 The wrapper `navid/h200.py` controls VAE compilation. This deployment selects Dense
 attention, BF16 compute and BF16 Ulysses transport, and uses VAE batches per clip.

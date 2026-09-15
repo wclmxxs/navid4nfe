@@ -13,26 +13,37 @@ COMPONENTS = ("audio_scheduler", "audio_vae", "processor", "scheduler", "text_en
 MIN_FREE_GPU_GIB = 125
 
 
-def print_gpu_processes() -> None:
-    print("\nGPU process inventory (read-only; no processes will be stopped):", flush=True)
+def gpu_process_inventory() -> str:
+    lines = ["GPU process inventory (read-only; no processes will be stopped):"]
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory", "--format=csv"],
             capture_output=True, text=True, timeout=10, check=False,
         )
-        print(result.stdout.strip() or result.stderr.strip() or "No compute processes reported.", flush=True)
+        lines.append(result.stdout.strip() or result.stderr.strip() or "No compute processes reported.")
     except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"Could not query GPU processes: {error}", flush=True)
-    print("If memory is occupied but no owner is listed, run nvidia-smi on the host outside the container.", flush=True)
+        lines.append(f"Could not query GPU processes: {error}")
+    lines.append("If memory is occupied but no owner is listed, run nvidia-smi on the host outside the container.")
+    return "\n".join(lines)
+
+
+def print_gpu_processes() -> None:
+    print("\n" + gpu_process_inventory(), flush=True)
 
 
 def check_gpus(cuda) -> None:
     if cuda.device_count() != 8:
         print_gpu_processes()
         raise RuntimeError(f"Expected 8 visible GPUs, got {cuda.device_count()}")
+    check_gpu_memory(cuda, range(8))
+
+
+def check_gpu_memory(cuda, indices) -> None:
+    # During serial loading, earlier ranks already own model weights. Inspect
+    # only the rank about to move its CPU model to CUDA in that case.
     issues = []
     print("GPU memory before model loading (GiB; indices follow CUDA_VISIBLE_DEVICES):", flush=True)
-    for i in range(8):
+    for i in indices:
         props = cuda.get_device_properties(i)
         free, total = cuda.mem_get_info(i)
         print(f"GPU {i}: {props.name}; total={total / 1024**3:.1f}, "
@@ -45,11 +56,16 @@ def check_gpus(cuda) -> None:
     if issues:
         print_gpu_processes()
         raise RuntimeError(
-            "; ".join(issues) + ". No model weights have been loaded by this preflight. "
+            "; ".join(issues) + ". Insufficient free memory before GPU model loading. "
             "This BF16/Ulysses profile keeps full model weights on each GPU; eight GPUs do not divide "
             "the weight memory by eight. Identify the listed workloads and stop the ones you intend "
             "to replace, then rerun ./deploy.sh. Installed dependencies will be reused."
         )
+
+
+def gpucheck() -> None:
+    import torch
+    check_gpus(torch.cuda)
 
 
 def validate_model(root: Path) -> None:
@@ -131,7 +147,7 @@ def preflight() -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["download", "preflight"])
+    parser.add_argument("action", choices=["download", "preflight", "gpucheck"])
     args = parser.parse_args()
     config.initialize_dirs()
     globals()[args.action]()

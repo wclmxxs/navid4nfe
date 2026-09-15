@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from . import config
+from .errors import failure_report
 from .store import Store
 
 
@@ -110,7 +111,7 @@ def serve() -> int:
         except BlockingIOError:
             print("Another supervisor already owns this checkout.", flush=True)
             return 1
-        run_id = uuid.uuid4().hex
+        run_id = os.environ.get("NAVID_RUN_ID") or uuid.uuid4().hex
         port = int(os.environ.get("PORT", "8000"))
         config.atomic_json(config.RUNTIME / "pid.json", {
             "pid": os.getpid(), "stamp": process_stamp(os.getpid()), "run_id": run_id,
@@ -173,6 +174,12 @@ def start() -> int:
     if running():
         print("Service already running; use './deploy.sh restart' to apply changes.")
         return status()
+    # The install-time preflight may precede a long download. Recheck immediately
+    # before every new service launch, including start/restart without downloads.
+    print("Rechecking all eight GPUs before starting the service.", flush=True)
+    result = subprocess.run([sys.executable, "-m", "navid.prepare", "gpucheck"], cwd=config.ROOT, check=False)
+    if result.returncode:
+        return result.returncode
     key_path = config.RUNTIME / "api.key"
     try:
         with key_path.open("x") as stream:
@@ -180,9 +187,14 @@ def start() -> int:
         key_path.chmod(0o600)
     except FileExistsError:
         pass
+    run_id = uuid.uuid4().hex
+    offsets = {name: (config.RUNTIME / name).stat().st_size if (config.RUNTIME / name).exists() else 0
+               for name in ("worker.log", "api.log", "service.log")}
+    config.atomic_json(config.RUNTIME / "last-run.json", {"run_id": run_id, "log_offsets": offsets})
     with (config.RUNTIME / "service.log").open("ab", buffering=0) as log:
         child = subprocess.Popen([sys.executable, "-m", "navid.service", "serve"], cwd=config.ROOT,
-                                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+                                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                 env={**os.environ, "NAVID_RUN_ID": run_id})
     deadline = time.monotonic() + int(os.environ.get("READY_TIMEOUT", "7200")) + 30
     last_notice = 0
     try:
@@ -207,17 +219,18 @@ def start() -> int:
             child.terminate()
             child.wait(timeout=25)
         print(str(error), file=sys.stderr)
-        for name in ("worker.log", "api.log", "service.log"):
-            path = config.RUNTIME / name
-            if path.exists():
-                print(f"--- {name} (last 30 lines) ---", file=sys.stderr)
-                print("\n".join(path.read_text(errors="replace").splitlines()[-30:]), file=sys.stderr)
+        print(failure_report(), file=sys.stderr)
         return 1
+
+
+def errors() -> int:
+    print(failure_report())
+    return 0
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["start", "stop", "status", "serve", "is-running"])
+    parser.add_argument("action", choices=["start", "stop", "status", "serve", "is-running", "errors"])
     args = parser.parse_args()
     config.initialize_dirs()
     if args.action == "is-running":

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import time
-import traceback
 from datetime import timedelta
 
 from . import config
+from .errors import save_worker_error
 from .media import verify_output
 from .store import Store
 
@@ -24,6 +24,7 @@ def main() -> None:
     from PIL import Image, ImageDraw
 
     from .h200 import configure
+    from .prepare import check_gpu_memory
 
     rank = int(os.environ["LOCAL_RANK"])
     if int(os.environ["WORLD_SIZE"]) != 8:
@@ -41,7 +42,8 @@ def main() -> None:
         state("loading")
 
     engine = MiniMaxH3Inference(str(config.MODEL), config.ADAPTER, attention_backend="dense",
-                               task="ref2va", compute_quant="none", reference_image_resize_mode="match")
+                               task="ref2va", compute_quant="none", reference_image_resize_mode="match",
+                               before_gpu_load=lambda index: check_gpu_memory(torch.cuda, [index]))
 
     # Smoke test the same Ref2VA path as production, including reference encoding,
     # four actual DiT calls, eight-rank communication, VAE and MP4/audio encoding.
@@ -119,9 +121,15 @@ def main() -> None:
             raise
 
 
-if __name__ == "__main__":
+def run_worker() -> None:
     try:
         main()
-    except BaseException:
-        traceback.print_exc()
+    except Exception as error:
+        save_worker_error(error)
         raise
+
+
+if __name__ == "__main__":
+    from torch.distributed.elastic.multiprocessing.errors import record
+
+    record(run_worker)()

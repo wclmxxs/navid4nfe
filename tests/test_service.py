@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 from navid import config, service
 from navid.store import Store
@@ -46,3 +47,31 @@ def test_probe_uses_configured_bind_host():
     assert service.endpoint({"host": "0.0.0.0", "port": 8000}) == "http://127.0.0.1:8000"
     assert service.endpoint({"host": "10.0.0.1", "port": 8000}) == "http://10.0.0.1:8000"
     assert service.endpoint({"host": "::", "port": 8000}) == "http://[::1]:8000"
+
+
+def test_failed_launch_memory_check_does_not_start_any_process(monkeypatch):
+    monkeypatch.setattr(service, "running", lambda: None)
+    commands = []
+
+    def check(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=1)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("No background service should start when GPU memory is occupied")
+
+    monkeypatch.setattr(service.subprocess, "run", check)
+    monkeypatch.setattr(service.subprocess, "Popen", unexpected)
+    assert service.start() == 1
+    assert commands[0][-2:] == ["navid.prepare", "gpucheck"]
+
+
+def test_start_existing_service_does_not_check_its_occupied_gpus(monkeypatch):
+    monkeypatch.setattr(service, "running", lambda: {"pid": 123})
+    monkeypatch.setattr(service, "status", lambda: 0)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("A running service already owns the GPUs")
+
+    monkeypatch.setattr(service.subprocess, "run", unexpected)
+    assert service.start() == 0

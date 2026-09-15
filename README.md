@@ -16,7 +16,7 @@
 2. 在本目录安装校验过 SHA256 的 uv、Python 3.12 和隔离的 `.venv`。
 3. 安装 PyTorch 2.10 / CUDA 12.8、Triton、固定提交的 Diffusers 等依赖。
 4. 下载固定版本的 `MiniMaxAI/MiniMax-H3` Ref2VA 分区及四步 LoRA；中断后再次执行会续传。
-5. 后台启动独立 HTTP API 和一个 `torchrun` 八卡 worker。
+5. 重新检查八卡空闲显存，后台启动独立 HTTP API 和一个 `torchrun` 八卡 worker。
 6. 执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行 4 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
 
 首次执行需要联网下载依赖和大模型，模型按卡依次加载以降低主机内存峰值。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
@@ -135,11 +135,14 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 释放显存后再次执行 `./deploy.sh`，已安装的依赖会复用。
 
+下载前检查通过并不表示后续显存仍然空闲。每次 `deploy/start/restart` 真正启动服务前会重新检查八卡，每个 rank 完成 CPU 权重加载后、搬入 GPU 前再检查该卡。如果 OOM 同时列出另一进程的显存占用，可用 `nvidia-smi` 和 `ps -p <PID> -o pid,ppid,user,etime,args` 确认归属；单次检查不能阻止其他服务随后抢占显存，需要确保运行期间这八张卡可持续供本服务使用。
+
 ### 服务管理
 
 ```bash
 ./deploy.sh status     # 只有模型就绪才返回退出码 0
 ./deploy.sh logs       # 跟随 supervisor / API / GPU 日志
+./deploy.sh errors     # 显示原始异常，无需再次下载权重或加载模型
 ./deploy.sh stop       # 关闭全部进程并释放 GPU
 ./deploy.sh start      # 复用环境和权重，启动并验证
 ./deploy.sh restart    # 应用当前代码和 .env
@@ -149,6 +152,8 @@ curl --fail -H "X-API-Key: $API_KEY" \
 生成文件与素材保存在 `DATA_DIR`（默认 `data/`），任务元数据保存在同目录的 SQLite 数据库。服务不会自动删除历史文件；请按使用量安排磁盘清理。清空整个 `DATA_DIR` 前先停止服务，避免删除正在使用的素材。缓存、环境、API key、权重和数据都已加入 `.gitignore`。
 
 这是宿主机上的后台进程，不安装系统开机服务。机器重启后执行 `./deploy.sh start`。
+
+如日志末尾只有 `ChildFailedError`、`exitcode: 1` 和其他 rank 的 `SIGTERM`，执行 `./deploy.sh errors` 查看前面的原始 Python 异常。新启动会按 run/rank 单独保存 traceback，自动失败输出优先展示最早记录的异常；旧日志也可提取 traceback 上下文。SIGTERM 通常是某个 rank 失败后其余进程的清理结果，不能单凭它判断根因。
 
 ## H200 配置与验证边界
 

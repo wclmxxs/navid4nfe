@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
@@ -120,6 +120,7 @@ class MiniMaxH3Inference:
         task: str = "t2v",
         reference_image_resize_mode: str = "match",
         compute_quant: str = "none",
+        before_gpu_load: Callable[[int], None] | None = None,
     ) -> None:
         self._owns_process_group = False
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -207,8 +208,10 @@ class MiniMaxH3Inference:
             if dist.is_initialized():
                 dist.barrier()
             if self.rank == loading_rank:
-                print(f"Loading model on GPU rank {self.rank}/{self.world_size}", flush=True)
+                print(f"Loading model on GPU rank {self.rank}/{self.world_size}; pid={os.getpid()}", flush=True)
                 self.pipe.load_components(**load_kwargs)
+                if before_gpu_load is not None:
+                    before_gpu_load(local_rank)
                 self.pipe.to(self.device)
             if dist.is_initialized():
                 dist.barrier()
