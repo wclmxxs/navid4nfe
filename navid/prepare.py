@@ -4,11 +4,52 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from . import config
 
 COMPONENTS = ("audio_scheduler", "audio_vae", "processor", "scheduler", "text_encoder", "tokenizer", "vae", "transformer_ref")
+MIN_FREE_GPU_GIB = 125
+
+
+def print_gpu_processes() -> None:
+    print("\nGPU process inventory (read-only; no processes will be stopped):", flush=True)
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory", "--format=csv"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        print(result.stdout.strip() or result.stderr.strip() or "No compute processes reported.", flush=True)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Could not query GPU processes: {error}", flush=True)
+    print("If memory is occupied but no owner is listed, run nvidia-smi on the host outside the container.", flush=True)
+
+
+def check_gpus(cuda) -> None:
+    if cuda.device_count() != 8:
+        print_gpu_processes()
+        raise RuntimeError(f"Expected 8 visible GPUs, got {cuda.device_count()}")
+    issues = []
+    print("GPU memory before model loading (GiB; indices follow CUDA_VISIBLE_DEVICES):", flush=True)
+    for i in range(8):
+        props = cuda.get_device_properties(i)
+        free, total = cuda.mem_get_info(i)
+        print(f"GPU {i}: {props.name}; total={total / 1024**3:.1f}, "
+              f"used={(total - free) / 1024**3:.1f}, free={free / 1024**3:.1f}; "
+              f"required free>={MIN_FREE_GPU_GIB} GiB", flush=True)
+        if "H200" not in props.name or (props.major, props.minor) != (9, 0):
+            issues.append(f"GPU {i} must be H200 SM90, got {props.name}")
+        if free < MIN_FREE_GPU_GIB * 1024**3:
+            issues.append(f"GPU {i} has only {free / 1024**3:.1f} GiB free")
+    if issues:
+        print_gpu_processes()
+        raise RuntimeError(
+            "; ".join(issues) + ". No model weights have been loaded by this preflight. "
+            "This BF16/Ulysses profile keeps full model weights on each GPU; eight GPUs do not divide "
+            "the weight memory by eight. Identify the listed workloads and stop the ones you intend "
+            "to replace, then rerun ./deploy.sh. Installed dependencies will be reused."
+        )
 
 
 def validate_model(root: Path) -> None:
@@ -57,23 +98,12 @@ def download() -> None:
 
 
 def preflight() -> None:
-    import subprocess
-
     import torch
     import torch.nn.functional as F
     from torch.nn.attention import SDPBackend, sdpa_kernel
     if torch.__version__ != "2.10.0+cu128":
         raise RuntimeError(f"Unexpected PyTorch build: {torch.__version__}")
-    if torch.cuda.device_count() != 8:
-        raise RuntimeError(f"Expected 8 visible GPUs, got {torch.cuda.device_count()}")
-    for i in range(8):
-        props = torch.cuda.get_device_properties(i)
-        if "H200" not in props.name or (props.major, props.minor) != (9, 0):
-            raise RuntimeError(f"GPU {i} must be H200 SM90, got {props.name}")
-        free, total = torch.cuda.mem_get_info(i)
-        if free < 125 * 1024**3:
-            raise RuntimeError(f"GPU {i} has only {free / 1024**3:.1f} GiB free; free GPU memory before starting")
-        print(f"GPU {i}: {props.name}, {free / 1024**3:.1f}/{total / 1024**3:.1f} GiB", flush=True)
+    check_gpus(torch.cuda)
     # Require native CUDA 12.8 driver support: Triton compiles kernels at runtime.
     version = subprocess.check_output(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], text=True).splitlines()[0]
     if tuple(int(p) for p in version.split(".")[:2]) < (570, 26):
