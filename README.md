@@ -137,12 +137,15 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 下载前检查通过并不表示后续显存仍然空闲。每次 `deploy/start/restart` 真正启动服务前会重新检查八卡，每个 rank 完成 CPU 权重加载后、搬入 GPU 前再检查该卡。如果 OOM 同时列出另一进程的显存占用，可用 `nvidia-smi` 和 `ps -p <PID> -o pid,ppid,user,etime,args` 确认归属；单次检查不能阻止其他服务随后抢占显存，需要确保运行期间这八张卡可持续供本服务使用。
 
+如果 PID 持续变化或 `ps` 查不到旧 PID，执行 `./deploy.sh gpu-status`。它实时采集 GPU 进程及父进程链、工作目录、cgroup/systemd 单元线索和正在运行的 Docker 容器（含 Compose 服务名），不初始化 CUDA、不加载模型。显存检查失败时也会立即打印当时的父进程链。`ps` 查不到可能是进程已退出、权限不足或 PID 命名空间不同，不能据此判断显存已释放；应定位上层服务、watchdog 或容器，避免只停 worker 后又被拉起。
+
 ### 服务管理
 
 ```bash
 ./deploy.sh status     # 只有模型就绪才返回退出码 0
 ./deploy.sh logs       # 跟随 supervisor / API / GPU 日志
 ./deploy.sh errors     # 显示原始异常，无需再次下载权重或加载模型
+./deploy.sh gpu-status # 实时查看 GPU 占用者、父进程链和 Docker 服务
 ./deploy.sh stop       # 关闭全部进程并释放 GPU
 ./deploy.sh start      # 复用环境和权重，启动并验证
 ./deploy.sh restart    # 应用当前代码和 .env

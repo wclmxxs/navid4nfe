@@ -14,17 +14,8 @@ MIN_FREE_GPU_GIB = 125
 
 
 def gpu_process_inventory() -> str:
-    lines = ["GPU process inventory (read-only; no processes will be stopped):"]
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory", "--format=csv"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-        lines.append(result.stdout.strip() or result.stderr.strip() or "No compute processes reported.")
-    except (OSError, subprocess.TimeoutExpired) as error:
-        lines.append(f"Could not query GPU processes: {error}")
-    lines.append("If memory is occupied but no owner is listed, run nvidia-smi on the host outside the container.")
-    return "\n".join(lines)
+    from .gpu_diagnostics import inventory
+    return inventory()
 
 
 def print_gpu_processes() -> None:

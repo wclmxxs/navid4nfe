@@ -4,11 +4,11 @@ set -Eeuo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 action=${1:-deploy}
-if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|errors|check]" >&2; exit 2; fi
+if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|errors|gpu-status|check]" >&2; exit 2; fi
 case "$action" in
   -h|--help|help)
     cat <<'HELP'
-Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|check]
+Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|check]
   deploy   Default: install a private Python/CUDA environment, download pinned
            Ref2VA weights, start the API + eight GPU ranks, wait for real warmup.
   start    Start an already installed deployment and wait for readiness.
@@ -17,6 +17,7 @@ Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|check]
   status   Return 0 only when the model service is ready.
   logs     Follow supervisor, API and GPU logs.
   errors   Show the original worker exception without loading the model again.
+  gpu-status  Capture live GPU owners, parent processes and Docker containers.
   check    Check the installed CUDA/kernel environment and checkpoint layout.
 
 Target: Linux with 8 NVIDIA H200 GPUs and driver >=570.26.
@@ -24,7 +25,7 @@ Optional configuration: .env (see .env.example); shell environment takes priorit
 No Docker or systemd required. Ctrl-C during startup cancels the new service.
 HELP
     exit 0 ;;
-  deploy|start|stop|restart|status|logs|errors|check) ;;
+  deploy|start|stop|restart|status|logs|errors|gpu-status|check) ;;
   *) echo "Unknown action: $action (use --help)" >&2; exit 2 ;;
 esac
 [[ $(uname -s) == Linux ]] || { echo "Deployment requires a Linux H200 host." >&2; exit 1; }
@@ -61,6 +62,10 @@ export H3_VAE_GLOBAL_BATCH=0
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 PYTHON="$ROOT/.venv/bin/python"
 
+if [[ $action == gpu-status ]]; then
+  if [[ ! -x $PYTHON ]]; then PYTHON=python3; fi
+  exec "$PYTHON" -m navid.gpu_diagnostics
+fi
 if [[ $action == logs ]]; then
   touch .runtime/service.log .runtime/api.log .runtime/worker.log
   exec tail -n 60 -F .runtime/service.log .runtime/api.log .runtime/worker.log
