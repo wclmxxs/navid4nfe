@@ -7,6 +7,7 @@ import time
 
 from .dit_cache import ResidualCache
 from .options import BUCKET, Optimization, RequestRejected
+from .startup import dit_compile_enabled
 
 
 def dense_attention(q, k, v):
@@ -36,7 +37,7 @@ class RequestRuntime:
         # Triton host TensorDescriptors need device scratch storage on Hopper.
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.uint8))
         self.engine = engine
-        self.compile_enabled = os.environ.get("DIT_COMPILE", "0") == "1"
+        self.compile_enabled = dit_compile_enabled()
         self.compiles = 0
         self.compile_s = 0.0
         self.seen_shapes = set()

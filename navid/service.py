@@ -69,7 +69,8 @@ def worker_progress(worker: dict, run_id: str) -> str:
                 return phase
             stream.seek(max(offset, size - 1024 * 1024))
             lines = stream.read().decode(errors="replace").splitlines()
-        markers = ("Loading model on GPU rank ", "Loaded model on GPU rank ",
+        markers = ("MODEL_LOAD_PLAN:", "Loading model on GPU rank ", "CPU weights ready on GPU rank ",
+                   "Loaded model on GPU rank ",
                    "All GPU model copies loaded;")
         for line in reversed(lines):
             if line.startswith(markers):

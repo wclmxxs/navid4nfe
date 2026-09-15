@@ -100,3 +100,36 @@ def test_bucket_padding_never_participates_in_dense_attention():
         torch.testing.assert_close(output[:logical], dense_attention(q[:logical], k[:logical], v[:logical]))
         assert torch.isfinite(output).all()
         assert not output[logical:].any()
+
+
+@pytest.mark.parametrize("parallelism", [1, 2, 4, 8])
+def test_distributed_load_groups_bound_concurrency_and_load_every_rank(parallelism):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from h3_runtime.loading import load_in_groups
+
+    barrier = threading.Barrier(8, timeout=5)
+    group_barriers = [threading.Barrier(parallelism, timeout=5) for _ in range(8 // parallelism)]
+    lock = threading.Lock()
+    active = set()
+    seen = []
+    peaks = []
+
+    def rank_main(rank):
+        def load():
+            with lock:
+                active.add(rank)
+                peaks.append(len(active))
+                assert len({r // parallelism for r in active}) == 1
+                seen.append(rank)
+            group_barriers[rank // parallelism].wait()
+            with lock:
+                active.remove(rank)
+
+        load_in_groups(load, rank=rank, world_size=8, parallelism=parallelism, barrier=barrier.wait)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(rank_main, range(8)))
+    assert sorted(seen) == list(range(8))
+    assert max(peaks) == parallelism

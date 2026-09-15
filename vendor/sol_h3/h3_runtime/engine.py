@@ -128,6 +128,7 @@ class MiniMaxH3Inference:
         reference_image_resize_mode: str = "match",
         compute_quant: str = "none",
         before_gpu_load: Callable[[int], None] | None = None,
+        load_parallelism: int = 1,
     ) -> None:
         self._owns_process_group = False
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -213,23 +214,27 @@ class MiniMaxH3Inference:
             # Resolve every Ref2VA component below the selected model root. This
             # also avoids stale absolute paths in locally converted indexes.
             load_kwargs["pretrained_model_name_or_path"] = model_path
-        # Local H200 deployment change: stage one rank's CPU weights at a time.
-        # Without this, eight simultaneous CPU copies can exceed host RAM before
-        # the models are moved to their GPU. All ranks enter both barriers.
-        for loading_rank in range(self.world_size):
-            if dist.is_initialized():
-                dist.barrier()
-            if self.rank == loading_rank:
-                loading_started = time.monotonic()
-                print(f"Loading model on GPU rank {self.rank}/{self.world_size}; pid={os.getpid()}", flush=True)
-                self.pipe.load_components(**load_kwargs)
-                if before_gpu_load is not None:
-                    before_gpu_load(local_rank)
-                self.pipe.to(self.device)
-                print(f"Loaded model on GPU rank {self.rank}/{self.world_size}; "
-                      f"elapsed={time.monotonic() - loading_started:.1f}s", flush=True)
-            if dist.is_initialized():
-                dist.barrier()
+        from .loading import load_in_groups
+
+        def load_copy():
+            loading_started = time.monotonic()
+            print(f"Loading model on GPU rank {self.rank}/{self.world_size}; pid={os.getpid()}", flush=True)
+            self.pipe.load_components(**load_kwargs)
+            cpu_seconds = time.monotonic() - loading_started
+            print(f"CPU weights ready on GPU rank {self.rank}/{self.world_size}; "
+                  f"cpu_load_s={cpu_seconds:.1f}; transferring to CUDA", flush=True)
+            if before_gpu_load is not None:
+                before_gpu_load(local_rank)
+            transfer_started = time.monotonic()
+            self.pipe.to(self.device)
+            torch.cuda.synchronize(self.device)
+            print(f"Loaded model on GPU rank {self.rank}/{self.world_size}; "
+                  f"cpu_load_s={cpu_seconds:.1f}; cuda_transfer_s={time.monotonic() - transfer_started:.1f}; "
+                  f"elapsed={time.monotonic() - loading_started:.1f}s", flush=True)
+
+        load_in_groups(load_copy, rank=self.rank, world_size=self.world_size,
+                       parallelism=load_parallelism,
+                       barrier=dist.barrier if dist.is_initialized() else lambda: None)
         if self.rank == 0:
             print("All GPU model copies loaded; fusing LoRA and configuring inference kernels", flush=True)
         self.transformer = (

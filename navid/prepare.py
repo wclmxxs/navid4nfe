@@ -127,11 +127,8 @@ def preflight() -> None:
     torch.testing.assert_close(fused_swiglu(x), expected, rtol=0.02, atol=0.02)
     torch.cuda.synchronize()
     print("CUDA, native Flash SDPA and Triton kernel checks passed.", flush=True)
-    available = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    memory_gib = int(available["MemAvailable"].split()[0]) / 1024**2
-    if memory_gib < 160:
-        raise RuntimeError(f"At least 160 GiB available host RAM required; got {memory_gib:.1f} GiB")
-    print(f"Available host RAM: {memory_gib:.1f} GiB; ranks load sequentially.", flush=True)
+    from .startup import load_plan
+    print(f"Model loading plan (rechecked before loading): {load_plan()}", flush=True)
     config.CHECKPOINTS.mkdir(parents=True, exist_ok=True)
     print(f"Free checkpoint disk: {shutil.disk_usage(config.CHECKPOINTS).free / 1024**3:.1f} GiB", flush=True)
 

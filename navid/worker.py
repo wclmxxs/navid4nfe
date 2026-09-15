@@ -8,6 +8,7 @@ from . import config
 from .errors import save_worker_error
 from .media import verify_output
 from .options import RequestRejected
+from .startup import dit_compile_enabled, load_plan
 from .store import Store
 
 
@@ -45,12 +46,18 @@ def main() -> None:
     check_sol_kernel()
     dist.barrier()
     store = Store(config.DATA) if rank == 0 else None
+    # Rank zero chooses once, then every rank enters identical loading groups.
+    plans = [load_plan() if rank == 0 else None]
+    dist.broadcast_object_list(plans, src=0)
+    plan = plans[0]
     if rank == 0:
-        state("loading")
+        print(f"MODEL_LOAD_PLAN: {plan}; DIT_COMPILE={int(dit_compile_enabled())}", flush=True)
+        state("loading", load_plan=plan)
 
     engine = MiniMaxH3Inference(str(config.MODEL), config.ADAPTER, attention_backend="dense",
                                task="ref2va", compute_quant="none", reference_image_resize_mode="match",
-                               before_gpu_load=lambda index: check_gpu_memory(torch.cuda, [index]))
+                               before_gpu_load=lambda index: check_gpu_memory(torch.cuda, [index]),
+                               load_parallelism=plan["parallelism"])
 
     from .runtime import RequestRuntime
 

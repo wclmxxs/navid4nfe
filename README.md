@@ -19,9 +19,13 @@
 5. 重新检查八卡空闲显存，后台启动独立 HTTP API 和一个 `torchrun` 八卡 worker。
 6. 在每张 H200 上执行 Sol/TMA 数值检查（包含 4096 桶边界、部分尾块），再执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行 4 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
 
-首次执行需要联网下载依赖和大模型，模型按卡依次加载以降低主机内存峰值。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
+首次执行需要联网下载依赖和大模型。模型加载默认按可用主机/容器内存自动选择 1 / 2 / 4 / 8 个 rank 并发；约 2 TB 空闲内存的主机可八卡同时加载。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
 
-等待提示和 `./deploy.sh status` 会显示本次启动最近的加载进度，GPU rank 从 0 到 7。`Loading model` 表示开始该卡加载，`Loaded model` 表示该卡权重搬运完成；八卡加载后还有 LoRA 融合和真实生成预热。仅重复出现 `loading` 不能说明卡死，需结合 worker 日志和 GPU 占用判断。`READY_TIMEOUT` 默认 7200 秒，是启动超时上限，不是预计耗时。
+等待提示和 `./deploy.sh status` 会显示本次启动最近的加载进度，GPU rank 从 0 到 7。`MODEL_LOAD_PLAN` 显示并发数和内存预算，`Loading model` 表示开始该卡加载，`CPU weights ready` 表示 CPU 权重准备完成，`Loaded model` 显示 CPU 加载和 CUDA 搬运各自耗时；八卡加载后还有 LoRA 融合和真实生成预热。仅重复出现 `loading` 不能说明卡死，需结合 worker 日志和 GPU 占用判断。`READY_TIMEOUT` 默认 7200 秒，是启动超时上限，不是预计耗时。
+
+`restart` 会退出旧进程、释放显存，因此每次都要重新把完整模型装到每张卡，并重新融合 LoRA / 建立 AdaLN 表 / 执行预热。磁盘编译缓存能复用内核，不能保留已退出进程的 GPU 权重。模型常驻后，连续生成任务不重复加载；参考大小、时长、分辨率、Sol/cache 请求参数均不需要重启。
+
+`MODEL_LOAD_PARALLELISM=auto`（默认）按当前可用 RAM 选择并发数：每个加载中的 rank 预留 192 GiB、额外留 64 GiB；并发 8 需要至少 1600 GiB 可用。标准 cgroup v1/v2 限制也纳入判断。可显式指定 1 / 2 / 4 / 8；1 恢复串行，超出预算拒绝启动。并发加载共享磁盘和内存带宽，实际提速以日志为准。每卡仍保留完整权重，GPU 显存要求不变。
 
 已运行时再次执行 `./deploy.sh` 只显示现有服务状态。拉取新代码后用 `./deploy.sh restart`；若修改了 `requirements.txt`，先 `./deploy.sh stop` 再 `./deploy.sh`。
 
@@ -153,9 +157,10 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
 
 ### 编译与资源上限
 
-- `DIT_COMPILE=1` 开启 DiT block 的 PyTorch 编译，默认 0；`VAE_COMPILE=1` 单独控制 VAE。修改后重启。
+- `DIT_COMPILE` **默认 1**，启动预热自动触发 DiT block 的 PyTorch 编译；设为 0 可显式关闭；`VAE_COMPILE=1` 单独控制 VAE。修改后重启。
 - packed sequence 始终向上对齐 **4096**，八卡分片均匀；额外行在注意力入口排除，不能作为 KV。提示词文本、seed、参考素材 ID 均不进入编译键。
 - Sol 的描述符容量和 autotune 按 4096 分桶，真实长度及 tau 是运行时参数。DiT 的数值部分编译，通信和注意力调度保留 eager。VAE 按实际 tile 形状编译，不能仅凭总 token 数复用。
+- 若旧 `.env` 已写 `DIT_COMPILE=0`，它是显式覆盖，需要改为 1 或删除该行才能使用新默认值。编译优化的是推理，首次编译会增加预热时间，不能加速加载权重。
 - Triton / Inductor 磁盘缓存在 `.runtime/triton-cache` / `.runtime/inductor-cache`。首次遇到新桶的编译/调优成本仍可能较高。
 - `metrics.compile` 分别记录 `shape_seen`（过去成功执行过该形状）、`inductor_invocations`、`inductor_compile_s`、`graph_reused`；不把“见过形状”冒充底层磁盘编译缓存命中。PyTorch 调用编译后端的耗时可能包含磁盘缓存加载。
 - `MAX_OUTPUT_PIXELS=2088960`（可容纳 1920×1088），`MAX_PACKED_TOKENS=262144`。先按输出/参考素材组合估算，再按真实 packed rows 检查。它们是准入限制，不是所有组合都能放进显存的保证；超限先降低分辨率、时长或参考大小。

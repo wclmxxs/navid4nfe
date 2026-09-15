@@ -9,19 +9,21 @@ The upstream project page describes Sol-H3 code as Apache 2.0; this source snaps
 does not contain a top-level LICENSE file. Existing third-party notices and the
 FlashAttention license are preserved verbatim. Model weights have their own terms.
 
-Local edit in `h3_runtime/engine.py`: load components and move them to CUDA on one
-rank at a time, with barriers around each rank. This reduces peak host RAM during
-startup. The serialized load itself does not alter weights or scheduler arithmetic.
+Local edits in `h3_runtime/engine.py` and `loading.py`: load components and move
+them to CUDA in bounded rank groups, with barriers around each group. The engine
+keeps a default group size of one; the deployment chooses 1/2/4/8 from the actual
+available host/container RAM and broadcasts the choice to all ranks. A 192 GiB
+per-loader budget plus 64 GiB reserve avoids unconditionally making eight CPU
+copies on smaller machines. `MODEL_LOAD_PARALLELISM=1` restores serial loading.
+The grouped load does not alter weights or scheduler arithmetic.
 An optional `before_gpu_load` callback rechecks the current rank's free GPU memory
-after CPU loading and immediately before the CUDA transfer. Loading logs include
-each rank's PID so other GPU processes can be distinguished from this worker.
-Progress logs also mark each completed rank, elapsed loading time and the start
-of LoRA fusion so the launcher can show progress during a long startup.
+after CPU loading and immediately before the CUDA transfer. Logs show rank/PID,
+CPU weight preparation time and CUDA transfer time separately.
 
 The wrapper `navid/h200.py` controls VAE compilation. BF16 compute and BF16
 Ulysses transport remain selected. `navid/runtime.py` installs request-scoped
 Dense/Sol-Triton-TMA dispatch, 4096-row packing with explicit exclusion of the
-extra rows from attention, optional DiT compilation, and DBCache-style residual
+extra rows from attention, DiT compilation (on by default; explicitly disable with `DIT_COMPILE=0`), and DBCache-style residual
 reuse (Fn=1/Bn=0). It does not select the Blackwell BSA/MXFP8 paths.
 
 Additional local changes:
