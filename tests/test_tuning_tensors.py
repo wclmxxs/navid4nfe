@@ -67,6 +67,48 @@ def test_cache_all_ranks_use_global_sums():
         assert cache.decisions[-1]["relative_change"] == 0.5
 
 
+def test_default_runtime_executes_every_block_without_torch_compile(monkeypatch):
+    from types import SimpleNamespace
+
+    import h3_runtime
+    from navid.runtime import RequestRuntime
+
+    monkeypatch.delenv("DIT_COMPILE", raising=False)
+    monkeypatch.setitem(sys.modules, "triton", SimpleNamespace(set_allocator=lambda allocator: None))
+    installed = []
+    monkeypatch.setattr(h3_runtime, "ulysses", SimpleNamespace(
+        install=lambda transformer, attention_fn: installed.append(attention_fn)), raising=False)
+    monkeypatch.setitem(sys.modules, "h3_runtime.parallel_hooks", SimpleNamespace(
+        with_cp_reapplied=lambda transformer, install: install()))
+
+    def unexpected_compile(*args, **kwargs):
+        pytest.fail("The default runtime must not invoke torch.compile")
+
+    monkeypatch.setattr(torch, "compile", unexpected_compile)
+    calls = []
+
+    def numerical(hidden_states, *args):
+        calls.append(1)
+        return hidden_states + 1
+
+    blocks = [SimpleNamespace(forward=numerical, attn=SimpleNamespace(forward=numerical)) for _ in range(3)]
+    transformer = SimpleNamespace(transformer_blocks=blocks,
+        register_forward_pre_hook=lambda *args, **kwargs: None,
+        register_forward_hook=lambda *args, **kwargs: None)
+    runtime = RequestRuntime(SimpleNamespace(transformer=transformer, rank=0))
+    assert installed == [runtime]  # Attention remains installed without DiT compilation.
+    runtime.cache.skip = True  # A stale skip flag cannot bypass blocks when caching is off.
+    for step in range(4):
+        result = torch.zeros(1, 2, 3)
+        for block in blocks:
+            result = block.forward(result, None, None, None)
+        torch.testing.assert_close(result, torch.full_like(result, 3))
+    assert len(calls) == runtime.cache.blocks_computed == 12
+    assert runtime.cache.blocks_reused == 0
+    assert runtime.cache.previous_probe is runtime.cache.tail_residual is None
+    assert not runtime.compile_enabled and runtime.compiles == 0
+
+
 def test_bucket_padding_never_participates_in_dense_attention():
     from types import SimpleNamespace
 
@@ -77,7 +119,7 @@ def test_bucket_padding_never_participates_in_dense_attention():
     runtime.engine = SimpleNamespace(rank=0)
     runtime.step = -1
     runtime.events = [SimpleNamespace(record=lambda: None)] * 4
-    runtime.sol = SolOptions().model_dump()
+    runtime.sol = SolOptions(enabled=False).model_dump()
     runtime.cache = ResidualCache()
     runtime.seen_shapes = set()
     runtime.duration = 8

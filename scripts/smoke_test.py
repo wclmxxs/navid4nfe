@@ -21,10 +21,11 @@ def main() -> None:
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--reference-short-edge", type=int)
-    parser.add_argument("--sol", action="store_true")
-    parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--cache-dit", action="store_true")
-    parser.add_argument("--rdt", type=float, default=0.08)
+    parser.add_argument("--sol", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override Sol; omitted options inherit the server defaults")
+    parser.add_argument("--tau", type=float)
+    parser.add_argument("--cache-dit", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--rdt", type=float)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--output", type=Path, default=Path("data/smoke.mp4"))
@@ -49,9 +50,13 @@ def main() -> None:
             parser.error("--reference must be image:PATH, video:PATH or audio:PATH")
         ref = json.loads(call(f"/v1/references?kind={kind}", Path(name).read_bytes(), "application/octet-stream"))
         refs.append(ref["id"])
+    optimization = {"sol_attn": {}, "cache_dit": {}}
+    for group, field, value in (("sol_attn", "enabled", args.sol), ("sol_attn", "tau", args.tau),
+                                ("cache_dit", "enabled", args.cache_dit), ("cache_dit", "rdt", args.rdt)):
+        if value is not None:
+            optimization[group][field] = value
     payload = {"prompt": args.prompt, "duration": args.duration, "seed": args.seed, "references": refs,
-               "optimization": {"sol_attn": {"enabled": args.sol, "tau": args.tau},
-                                "cache_dit": {"enabled": args.cache_dit, "rdt": args.rdt}}}
+               "optimization": optimization}
     for name in ("width", "height", "reference_short_edge"):
         if getattr(args, name) is not None:
             payload[name] = getattr(args, name)

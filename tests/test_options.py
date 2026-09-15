@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from navid.options import VideoRequest, native_frames, reference_size
+from navid.options import VideoRequest, native_frames, optimization_defaults, reference_size, resolve_optimization
 
 
 def request(**kwargs):
@@ -57,3 +57,20 @@ def test_partial_optimization_defaults_and_request_isolation(monkeypatch):
                     {"cache_dit": {"warmup": 0}}, {"sol_attn": {"tau": -1}}):
         with pytest.raises(ValidationError):
             request(optimization=options)
+
+
+def test_sol_only_defaults_match_api_warmup_and_runtime(monkeypatch):
+    for name in ("SOL_ATTN_ENABLED", "SOL_ATTN_TAU", "SOL_ATTN_DENSE_STEPS", "CACHE_DIT_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    expected = optimization_defaults()
+    assert expected["sol_attn"]["enabled"] is True
+    assert expected["sol_attn"]["tau"] == 1.5
+    assert expected["sol_attn"]["dense_steps"] == 1
+    assert expected["sol_attn"]["sink_conditioning"] == "exact_kv_and_rows"
+    assert expected["cache_dit"]["enabled"] is False
+    assert request().execution()["optimization"] == resolve_optimization(None) == expected
+    monkeypatch.setenv("SOL_ATTN_TAU", "1.8")
+    partial = {"sol_attn": {"enabled": False}}
+    assert resolve_optimization(partial) == request(optimization=partial).resolved_optimization()
+    assert resolve_optimization(partial)["sol_attn"]["tau"] == 1.8
+    assert resolve_optimization(None)["sol_attn"]["enabled"] is True

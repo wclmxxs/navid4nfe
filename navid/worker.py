@@ -7,8 +7,8 @@ from datetime import timedelta
 from . import config
 from .errors import save_worker_error
 from .media import verify_output
-from .options import RequestRejected
-from .startup import dit_compile_enabled, load_plan
+from .options import RequestRejected, optimization_defaults
+from .startup import dit_compile_enabled, load_plan, vae_compile_enabled
 from .store import Store
 
 
@@ -51,7 +51,9 @@ def main() -> None:
     dist.broadcast_object_list(plans, src=0)
     plan = plans[0]
     if rank == 0:
-        print(f"MODEL_LOAD_PLAN: {plan}; DIT_COMPILE={int(dit_compile_enabled())}", flush=True)
+        print(f"MODEL_LOAD_PLAN: {plan}; DIT_COMPILE={int(dit_compile_enabled())}; "
+              f"VAE_COMPILE={int(vae_compile_enabled())}", flush=True)
+        print(f"OPTIMIZATION_DEFAULTS: {optimization_defaults()}", flush=True)
         state("loading", load_plan=plan)
 
     engine = MiniMaxH3Inference(str(config.MODEL), config.ADAPTER, attention_backend="dense",
@@ -83,7 +85,7 @@ def main() -> None:
     media = engine.generate(
         "A continuous shot of the round orange object on the table. The camera slowly moves closer. Quiet room ambience.",
         duration=5, seed=42, references=[MiniMaxH3Reference(image=str(smoke_image))],
-        optimization={"sol_attn": {"enabled": False}, "cache_dit": {"enabled": False}})
+        optimization=optimization_defaults())
     hook.remove()
     counts = [None] * 8
     dist.all_gather_object(counts, calls[0])
@@ -93,6 +95,7 @@ def main() -> None:
         smoke_output = config.RUNTIME / "warmup.mp4"
         media.save(smoke_output)
         verify_output(smoke_output, expected_frames=120)
+        config.atomic_json(config.RUNTIME / "warmup-metrics.json", media.metadata)
         print(f"WARMUP_OK: 8 x H200; Ref2VA; DiT calls={counts}; MP4 video+audio", flush=True)
     del media
     dist.barrier()

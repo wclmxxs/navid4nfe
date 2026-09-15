@@ -5,6 +5,7 @@ from navid.startup import (
     available_memory_bytes,
     dit_compile_enabled,
     loading_parallelism,
+    vae_compile_enabled,
 )
 
 
@@ -40,11 +41,14 @@ def test_container_limit_caps_large_host_ram_including_parent(tmp_path):
     assert loading_parallelism(available) == 2
 
 
-def test_compile_defaults_on_but_keeps_explicit_disable(monkeypatch):
-    monkeypatch.delenv("DIT_COMPILE", raising=False)
-    assert dit_compile_enabled()
-    monkeypatch.setenv("DIT_COMPILE", "0")
-    assert not dit_compile_enabled()
-    monkeypatch.setenv("DIT_COMPILE", "unexpected")
-    with pytest.raises(ValueError, match="DIT_COMPILE"):
-        dit_compile_enabled()
+@pytest.mark.parametrize("name,enabled", [("DIT_COMPILE", dit_compile_enabled), ("VAE_COMPILE", vae_compile_enabled)])
+def test_compile_defaults_off_and_explicit_override(monkeypatch, name, enabled):
+    monkeypatch.delenv(name, raising=False)
+    assert not enabled()
+    monkeypatch.setenv(name, "1")
+    assert enabled()
+    monkeypatch.setenv(name, "0")
+    assert not enabled()
+    monkeypatch.setenv(name, "unexpected")
+    with pytest.raises(ValueError, match=name):
+        enabled()

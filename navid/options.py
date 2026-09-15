@@ -35,10 +35,10 @@ class StrictModel(BaseModel):
 
 
 class SolOptions(StrictModel):
-    enabled: bool = False
-    tau: float = Field(1.0, gt=0, le=10)
+    enabled: bool = True
+    tau: float = Field(1.5, gt=0, le=10)
     dense_steps: int = Field(1, ge=0, le=4, strict=True)
-    sink_conditioning: Literal["exact_kv", "exact_kv_and_rows", "off"] = "exact_kv"
+    sink_conditioning: Literal["exact_kv", "exact_kv_and_rows", "off"] = "exact_kv_and_rows"
     dense_prefix_seconds: float = Field(0.0, ge=0, le=15)
 
 
@@ -56,14 +56,21 @@ class Optimization(StrictModel):
 
 def optimization_defaults() -> dict:
     return Optimization(
-        sol_attn=SolOptions(enabled=os.environ.get("SOL_ATTN_ENABLED", "0") == "1",
-                            tau=float(os.environ.get("SOL_ATTN_TAU", "1")),
+        sol_attn=SolOptions(enabled=os.environ.get("SOL_ATTN_ENABLED", "1") == "1",
+                            tau=float(os.environ.get("SOL_ATTN_TAU", "1.5")),
                             dense_steps=int(os.environ.get("SOL_ATTN_DENSE_STEPS", "1"))),
         cache_dit=CacheOptions(enabled=os.environ.get("CACHE_DIT_ENABLED", "0") == "1",
                                warmup=int(os.environ.get("CACHE_DIT_WARMUP", "1")),
                                rdt=float(os.environ.get("CACHE_DIT_RDT", "0.08")),
                                max_continuous_cached_steps=int(os.environ.get("CACHE_DIT_MAX_CONTINUOUS", "1"))),
     ).model_dump()
+
+
+def resolve_optimization(overrides: dict | None = None) -> dict:
+    result = optimization_defaults()
+    for name, values in Optimization.model_validate(overrides or {}).model_dump(exclude_unset=True).items():
+        result[name].update(values)
+    return Optimization.model_validate(result).model_dump()
 
 
 class VideoRequest(StrictModel):
@@ -108,10 +115,7 @@ class VideoRequest(StrictModel):
         return tuple(math.ceil(side / 32) * 32 for side in self.output_size())
 
     def resolved_optimization(self) -> dict:
-        result = optimization_defaults()
-        for name, overrides in self.optimization.model_dump(exclude_unset=True).items():
-            result[name].update(overrides)
-        return Optimization.model_validate(result).model_dump()
+        return resolve_optimization(self.optimization.model_dump(exclude_unset=True))
 
     def execution(self) -> dict:
         return {"output_size": list(self.output_size()), "inference_size": list(self.inference_size()),

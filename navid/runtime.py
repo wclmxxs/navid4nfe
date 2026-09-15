@@ -6,7 +6,7 @@ import os
 import time
 
 from .dit_cache import ResidualCache
-from .options import BUCKET, Optimization, RequestRejected
+from .options import BUCKET, RequestRejected, resolve_optimization
 from .startup import dit_compile_enabled
 
 
@@ -101,7 +101,7 @@ class RequestRuntime:
     def begin(self, options: dict | None, duration: int):
         import torch
 
-        options = Optimization.model_validate(options or {}).model_dump()
+        options = resolve_optimization(options)
         self.sol = options["sol_attn"]
         self.cache.reset(options["cache_dit"])
         self.duration = duration

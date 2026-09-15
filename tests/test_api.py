@@ -35,8 +35,12 @@ def upload_image(client):
     return response.json()["id"]
 
 
-def test_submit_query_and_download(api):
+def test_submit_query_and_download(api, monkeypatch):
+    for name in ("SOL_ATTN_ENABLED", "SOL_ATTN_TAU", "CACHE_DIT_ENABLED", "DIT_COMPILE", "VAE_COMPILE"):
+        monkeypatch.delenv(name, raising=False)
     module, client = api
+    capabilities = client.get("/readyz").json()["capabilities"]
+    assert capabilities["compilation"] == {"dit": False, "vae": False}
     ref = upload_image(client)
     response = client.post("/v1/videos", json={"prompt": "An orange ball rolls", "duration": 5, "seed": 7, "references": [ref]})
     assert response.status_code == 202
@@ -45,6 +49,10 @@ def test_submit_query_and_download(api):
     job = module.store.claim()
     assert job["seed"] == 7
     assert job["references"][0]["kind"] == "image"
+    assert job["execution"]["optimization"] == capabilities["optimization_defaults"]
+    assert job["execution"]["optimization"]["sol_attn"]["enabled"] is True
+    assert job["execution"]["optimization"]["sol_attn"]["tau"] == 1.5
+    assert job["execution"]["optimization"]["cache_dit"]["enabled"] is False
     # Test the API handoff, not GPU synthesis; output bytes are an explicit fixture.
     output = config.DATA / "outputs" / f"{job_id}.mp4"
     output.write_bytes(b"fixture-video")

@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config
 from .media import validate_reference
 from .options import VideoRequest, check_workload, optimization_defaults
+from .startup import dit_compile_enabled, vae_compile_enabled
 from .store import QueueFull, Store
 
 config.initialize_dirs()
@@ -33,6 +34,7 @@ def health() -> tuple[bool, dict]:
     return ready, {"ready": ready, "phase": worker.get("phase", "starting") if alive else "unavailable",
                    "task": "ref2va", "nfe": 4, "gpus": 8, "attention": "request_configurable", "compute": "bf16",
                    "capabilities": {"duration": {"min": 4, "max": 15}, "compile_bucket": 4096,
+                                    "compilation": {"dit": dit_compile_enabled(), "vae": vae_compile_enabled()},
                                     "sol_backend": "triton_tma_sm90", "optimization_defaults": optimization_defaults()}}
 
 
