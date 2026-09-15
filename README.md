@@ -1,6 +1,6 @@
 # Navid 4 NFE：8× H200 一键部署 Ref2VA
 
-常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA 四步 LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **1344×768、24 FPS、带音频的 MP4**，时长档位为 5 / 10 / 15 秒。
+常驻 HTTP 服务，基于 **Sol-H3 + LightX2V Ref2VA 四步 LoRA**。一个任务使用全部 8 张 H200，后续任务排队。输出为 **24 FPS、带音频的 MP4**，默认 1344×768；支持 **4～15 整数秒、自定义横竖版分辨率、参考图短边、请求级 Sol attention / DiT 缓存**。编译桶固定按 4096 tokens 对齐。
 
 ## 启动：只执行一个脚本
 
@@ -17,7 +17,7 @@
 3. 安装 PyTorch 2.10 / CUDA 12.8、Triton、固定提交的 Diffusers 等依赖。
 4. 下载固定版本的 `MiniMaxAI/MiniMax-H3` Ref2VA 分区及四步 LoRA；中断后再次执行会续传。
 5. 重新检查八卡空闲显存，后台启动独立 HTTP API 和一个 `torchrun` 八卡 worker。
-6. 执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行 4 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
+6. 在每张 H200 上执行 Sol/TMA 数值检查（包含 4096 桶边界、部分尾块），再执行真实的 5 秒 Ref2VA 生成，检查**每张卡恰好执行 4 次 DiT 前向**、MP4 视频和音频均可解码，成功后打印 `READY` 并返回。
 
 首次执行需要联网下载依赖和大模型，模型按卡依次加载以降低主机内存峰值。可以在另一个终端用 `./deploy.sh logs` 查看进度。启动期间按 Ctrl-C 会取消本次启动；看到 `READY` 后退出终端，服务继续在后台运行。
 
@@ -100,7 +100,65 @@ curl --fail -X POST http://127.0.0.1:8000/v1/videos \
   }'
 ```
 
-返回 HTTP 202 和任务 `id`。最多 9 张图片、3 段视频、3 段音频，总计最多 12 个参考素材。固定四步，无请求级 steps / LoRA / attention 切换。`duration` 只接受 5 / 10 / 15，省略 `seed` 时生成随机 seed，查询结果会返回实际 seed。
+返回 HTTP 202 和任务 `id`。最多 9 张图片、3 段视频、3 段音频，总计最多 12 个参考素材。固定四步，无请求级 steps / LoRA 切换。`duration` 接受 4～15 整数，省略 `seed` 时生成随机 seed，查询结果会返回实际 seed。
+
+### 可选调优参数
+
+```json
+{
+  "prompt": "The man in Picture 1 walks out of a hotel and waves to the crowd. Cheering and city ambience.",
+  "references": ["参考图ID"],
+  "duration": 8,
+  "width": 1280,
+  "height": 720,
+  "seed": 42,
+  "reference_short_edge": 512,
+  "optimization": {
+    "sol_attn": {
+      "enabled": true,
+      "tau": 1.0,
+      "dense_steps": 1,
+      "sink_conditioning": "exact_kv",
+      "dense_prefix_seconds": 0
+    },
+    "cache_dit": {
+      "enabled": true,
+      "warmup": 1,
+      "rdt": 0.08,
+      "max_continuous_cached_steps": 1
+    }
+  }
+}
+```
+
+| 参数 | 取值和行为 |
+| --- | --- |
+| `reference_short_edge` | 128～2048 整数，等比例缩放后各边取最近的 32 倍数；默认只缩小，`reference_allow_upscale:true` 允许放大小图。省略则保留原来的约 1MP 上限。实际处理尺寸回传；无扩图。 |
+| `duration` | 4～15 整数。按 `17*n+5` 原生帧数推理，再截取前 `24*duration` 帧及对应音频，不变速；8 秒恰好原生 192 帧。AAC 容器可能有不足一帧编码填充。 |
+| `width` / `height` | 成对传入，128～4096 偶数，宽高比 1:4～4:1。内部各边向上取 32 倍数，输出缩放为请求尺寸（不会裁掉画面）。 |
+| `resolution` / `ratio` | 可替代 width/height；resolution 为短边（128～2048 偶数），ratio 支持 16:9、9:16、1:1、4:3、3:4、21:9、9:21。两组参数不能混用。 |
+| `sol_attn.enabled` | `false` 为 Dense，`true` 使用 H200 的 `triton_tma_sm90` Sol 稀疏注意力。不会静默切换 CuTe/BSA 后端。 |
+| `sol_attn.tau` | `(0,10]`，越大通常越稀疏，质量损失可能越大；1.0 是起始测试值。 |
+| `sol_attn.dense_steps` | 0～4，前多少个采样步使用 Dense；4 相当于全程 Dense。 |
+| `sol_attn.sink_conditioning` | `exact_kv`：保留全部 text/reference/audio 前缀 KV；`exact_kv_and_rows`：同时精确计算前缀 query；`off`：不保护前缀。KV 保护边界向外对齐 64。 |
+| `sol_attn.dense_prefix_seconds` | 0～15，目标视频开头对应的 latent 帧使用 Dense query，边界向上取整到 latent 帧；覆盖整段时全程 Dense。 |
+| `cache_dit.enabled` | 开关跨步残差缓存；本地实现 Cache-DiT 的 DBCache/Fn=1、Bn=0 策略，非额外安装官方 cache-dit 包。 |
+| `cache_dit.warmup` | 1～4，前多少个采样步全算；最后一个采样步始终全算。 |
+| `cache_dit.rdt` | `[0,1]`，累计相对 L1 变化阈值，越高越容易复用；0 不命中。0.08 为保守起始值，四步模型可能一次都不命中。 |
+| `cache_dit.max_continuous_cached_steps` | 1～2，允许连续复用的中间步数。每步仍计算第一个探测 block，最多复用中间两步的剩余 blocks。 |
+
+省略的调优字段继承 `.env` 默认值，显式 `enabled:false` 可以关闭。每个任务重新初始化缓存与配置，八卡通过全局归约决定是否复用，前一任务不会污染下一任务。参考算法：[Cache-DiT DBCache](https://github.com/vipshop/cache-dit/blob/main/docs/user_guide/DBCACHE_DESIGN.md)。
+
+默认 `.env` 关闭 Sol 和 DiT 缓存。开启优化并不保证加速；需要观察实际 sparse calls、缓存命中和画质。H200 当前选择已有的 Sol Triton/TMA 路径并增加 runtime length 支持，没有直接套用仅支持 SM100/103 的 CuTe 编译桶。
+
+### 编译与资源上限
+
+- `DIT_COMPILE=1` 开启 DiT block 的 PyTorch 编译，默认 0；`VAE_COMPILE=1` 单独控制 VAE。修改后重启。
+- packed sequence 始终向上对齐 **4096**，八卡分片均匀；额外行在注意力入口排除，不能作为 KV。提示词文本、seed、参考素材 ID 均不进入编译键。
+- Sol 的描述符容量和 autotune 按 4096 分桶，真实长度及 tau 是运行时参数。DiT 的数值部分编译，通信和注意力调度保留 eager。VAE 按实际 tile 形状编译，不能仅凭总 token 数复用。
+- Triton / Inductor 磁盘缓存在 `.runtime/triton-cache` / `.runtime/inductor-cache`。首次遇到新桶的编译/调优成本仍可能较高。
+- `metrics.compile` 分别记录 `shape_seen`（过去成功执行过该形状）、`inductor_invocations`、`inductor_compile_s`、`graph_reused`；不把“见过形状”冒充底层磁盘编译缓存命中。PyTorch 调用编译后端的耗时可能包含磁盘缓存加载。
+- `MAX_OUTPUT_PIXELS=2088960`（可容纳 1920×1088），`MAX_PACKED_TOKENS=262144`。先按输出/参考素材组合估算，再按真实 packed rows 检查。它们是准入限制，不是所有组合都能放进显存的保证；超限先降低分辨率、时长或参考大小。
 
 ### 3. 查询及下载
 
@@ -112,7 +170,7 @@ curl --fail -H "X-API-Key: $API_KEY" \
   http://127.0.0.1:8000/v1/videos/任务ID/content -o result.mp4
 ```
 
-任务状态：`queued → running → succeeded / failed`。成功后才允许下载，查询返回 `inference_s`（不含 MP4 编码），以及包含整个任务起止时间的 `started` / `finished`。
+任务状态：`queued → running → succeeded / failed`。成功后才允许下载，查询返回 `execution`（解析后的配置）、`metrics`（参考图尺寸、Sol 实际后端/调用数/首个调用 head0 的路由密度、DiT 缓存命中、编译及阶段耗时）。`nfe:4` 仍指四个采样前向，缓存会减少内部 block 计算。`inference_s` 是 GPU pipeline 时间，不含输出尺寸调整、MP4 编码、上传下载；`started/finished` 包含整个任务执行。GPU 阶段计时含首次编译等待，conditioning 包含参考图和文本编码。
 
 默认最多容纳 32 个未完成任务，满队列返回 429；未就绪返回 503；无效素材或参数返回 422。CUDA/NCCL 故障或任务超过 `TASK_TIMEOUT` 会关闭 API 和全部 GPU 进程，并将未完成任务标记为失败。通过日志定位问题后执行 `./deploy.sh start`。
 
@@ -125,7 +183,9 @@ curl --fail -H "X-API-Key: $API_KEY" \
   --duration 5 --seed 42 --output data/smoke.mp4
 ```
 
-只用图片时省略音频参数。该脚本依次上传、提交、等待并下载结果；从其他机器调用时传入 `--url http://<机器IP>:8000` 和 `API_KEY` 环境变量。可再分别验证 `--duration 10`、`--duration 15`。
+只用图片时省略音频参数。该脚本依次上传、提交、等待并下载结果；从其他机器调用时传入 `--url http://<机器IP>:8000` 和 `API_KEY` 环境变量。可添加 `--duration 8 --width 720 --height 1280 --reference-short-edge 512 --sol --cache-dit`，脚本会保存 MP4 和同名 JSON 指标。
+
+模型服务就绪后执行 `./deploy.sh verify`：使用同一素材/提示词/seed 比较 Dense、Sol、Cache、两者同时开启，然后再次关闭优化；另测 4 秒竖版 1080p、15 秒正方形 512。结果写入 `data/tuning-validation/`。可用 `.venv/bin/python scripts/verify_tuning.py --reference subject.png` 指定真人参考；脚本验证媒体格式/时长和优化是否执行，身份、动作、音频质量需要观看视频评估。
 
 ## 日常操作
 
@@ -168,7 +228,7 @@ curl --fail -H "X-API-Key: $API_KEY" \
 - VAE 使用按 clip 的八卡 tile 并行，默认关闭 `torch.compile`，可通过 `VAE_COMPILE=1` 开启并重新验收。
 - 根据 2026-09-15 目标机器返回的 `READY` 日志，**8× H200 已通过内置 5 秒、单张图片 Ref2VA 启动预热**：每卡执行四次 DiT 前向，生成的视频和音频可解码，HTTP 就绪检查通过。开发环境另验证了接口、任务队列、进程失败清理及依赖解析。
 - 2026-09-15 的实机单图、5 秒 HTTP 任务已完成上传、提交、查询及下载验证。下载后的 MP4 完整解码通过：1344×768、24 FPS、124 帧、H.264 视频和 32 kHz AAC 音轨。该次预热后任务的 `inference_s` 为 5.973 秒，任务执行时间为 6.916 秒（不含客户端上传、下载）；这是单次观测，不是通用性能基准。
-- 多参考、视频输入、音频输入和 10/15 秒仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
+- 以上实机记录来自改造前版本，不代表本次新增 Sol、缓存、4096 桶或新尺寸已通过 GPU 验收。本次变更本地 CPU 测试通过，新增 GPU 数值检查将在目标机启动时执行；用 `./deploy.sh verify` 做端到端验收。多参考、视频输入、音频输入仍需进一步验收；当前没有正式的 H200 画质评测数据。首个较长任务仍可能有额外开销，复杂参考组合可能占用更多显存。
 
 ## 固定来源
 
@@ -182,4 +242,4 @@ curl --fail -H "X-API-Key: $API_KEY" \
 
 来源：[Sol-H3](https://github.com/NVlabs/Sana/tree/sol-engine/models/minimax_h3/Sol-H3)、[LightX2V LoRA](https://huggingface.co/lightx2v/Minimax-h3-Turbo)、[PyTorch CUDA 12.8 安装说明](https://pytorch.org/get-started/previous-versions/#v2100)。上游原始文件哈希和本地改动说明位于 `vendor/sol_h3/`。
 
-本地 CPU 测试：安装 `fastapi`、`httpx`、`Pillow`、`numpy`、`av` 和 `pytest` 后执行 `python -m pytest -q tests`。`requirements.lock` 锁定了 Linux x86_64 / Python 3.12 的 74 个运行时依赖；修改版本时应同步重新解析该文件。
+本地 CPU 测试：安装 `fastapi`、`httpx`、`Pillow`、`numpy`、`av`、`torch` 和 `pytest` 后执行 `python -m pytest -q tests`。`requirements.lock` 锁定了 Linux x86_64 / Python 3.12 的 74 个运行时依赖；修改版本时应同步重新解析该文件。

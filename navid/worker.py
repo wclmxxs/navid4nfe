@@ -7,6 +7,7 @@ from datetime import timedelta
 from . import config
 from .errors import save_worker_error
 from .media import verify_output
+from .options import RequestRejected
 from .store import Store
 
 
@@ -20,7 +21,7 @@ def main() -> None:
     import torch.distributed as dist
     from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3Reference
     from h3_runtime import MiniMaxH3Inference
-    from h3_runtime.engine import DURATION_FRAMES, INFERENCE_STEPS
+    from h3_runtime.engine import INFERENCE_STEPS
     from PIL import Image, ImageDraw
 
     from .h200 import configure
@@ -37,6 +38,12 @@ def main() -> None:
     dist.init_process_group("nccl", device_id=torch.device("cuda", rank),
                             timeout=timedelta(seconds=int(os.environ.get("TASK_TIMEOUT", "1800"))))
     configure()
+    from .kernel_check import check_sol_kernel
+
+    if rank == 0:
+        state("checking_kernels")
+    check_sol_kernel()
+    dist.barrier()
     store = Store(config.DATA) if rank == 0 else None
     if rank == 0:
         state("loading")
@@ -44,6 +51,10 @@ def main() -> None:
     engine = MiniMaxH3Inference(str(config.MODEL), config.ADAPTER, attention_backend="dense",
                                task="ref2va", compute_quant="none", reference_image_resize_mode="match",
                                before_gpu_load=lambda index: check_gpu_memory(torch.cuda, [index]))
+
+    from .runtime import RequestRuntime
+
+    RequestRuntime(engine)
 
     # Smoke test the same Ref2VA path as production, including reference encoding,
     # four actual DiT calls, eight-rank communication, VAE and MP4/audio encoding.
@@ -64,7 +75,8 @@ def main() -> None:
     hook = engine.transformer.register_forward_pre_hook(count_forward)
     media = engine.generate(
         "A continuous shot of the round orange object on the table. The camera slowly moves closer. Quiet room ambience.",
-        duration=5, seed=42, references=[MiniMaxH3Reference(image=str(smoke_image))])
+        duration=5, seed=42, references=[MiniMaxH3Reference(image=str(smoke_image))],
+        optimization={"sol_attn": {"enabled": False}, "cache_dit": {"enabled": False}})
     hook.remove()
     counts = [None] * 8
     dist.all_gather_object(counts, calls[0])
@@ -73,7 +85,7 @@ def main() -> None:
     if rank == 0:
         smoke_output = config.RUNTIME / "warmup.mp4"
         media.save(smoke_output)
-        verify_output(smoke_output, expected_frames=DURATION_FRAMES[5])
+        verify_output(smoke_output, expected_frames=120)
         print(f"WARMUP_OK: 8 x H200; Ref2VA; DiT calls={counts}; MP4 video+audio", flush=True)
     del media
     dist.barrier()
@@ -100,14 +112,32 @@ def main() -> None:
         temporary = output.with_suffix(".partial.mp4")
         try:
             references = [MiniMaxH3Reference(**{r["kind"]: r["path"]}) for r in job["references"]]
-            media = engine.generate(job["prompt"], duration=job["duration"], seed=job["seed"], references=references)
+            execution = job["execution"]
+            width, height = execution["inference_size"]
+            media = engine.generate(job["prompt"], duration=job["duration"], seed=job["seed"], references=references,
+                                    width=width, height=height, output_size=execution["output_size"],
+                                    reference_short_edge=job.get("reference_short_edge"),
+                                    reference_allow_upscale=job.get("reference_allow_upscale", False),
+                                    optimization=execution["optimization"])
             if rank == 0:
                 media.save(temporary)
-                verify_output(temporary, expected_frames=DURATION_FRAMES[job["duration"]])
+                verify_output(temporary, expected_frames=execution["output_frames"],
+                              expected_size=execution["output_size"], expected_duration=job["duration"])
                 temporary.replace(output)
-                store.finish(job["id"], output=str(output), inference_s=round(media.elapsed_s, 3))
+                store.finish(job["id"], output=str(output), inference_s=round(media.elapsed_s, 3),
+                             metrics=media.metadata)
                 print(f"TASK_OK: {job['id']} inference_s={media.elapsed_s:.3f}", flush=True)
             del media
+            dist.barrier()
+            if rank == 0:
+                state("ready")
+        except RequestRejected as error:
+            # Every rank sees the same packed layout; this fails before any
+            # DiT collective or kernel starts. Keep the resident model usable.
+            engine.request_runtime.cache.release()
+            torch.cuda.empty_cache()
+            if rank == 0:
+                store.finish(job["id"], error=str(error))
             dist.barrier()
             if rank == 0:
                 state("ready")

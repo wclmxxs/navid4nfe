@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
-import secrets
 import time
 import uuid
 from pathlib import Path
@@ -11,16 +10,16 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from . import config
 from .media import validate_reference
+from .options import VideoRequest, check_workload, optimization_defaults
 from .store import QueueFull, Store
 
 config.initialize_dirs()
 store = Store(config.DATA)
-app = FastAPI(title="Navid 4 NFE · H200 Ref2VA", version="1.0.0")
+app = FastAPI(title="Navid 4 NFE · H200 Ref2VA", version="2.0.0")
 upload_slots = asyncio.Semaphore(2)
 
 
@@ -32,7 +31,9 @@ def health() -> tuple[bool, dict]:
              and time.time() - supervisor.get("heartbeat", 0) < 10)
     ready = alive and worker.get("run_id") == config.RUN_ID and worker.get("phase") in {"ready", "busy"}
     return ready, {"ready": ready, "phase": worker.get("phase", "starting") if alive else "unavailable",
-                   "task": "ref2va", "nfe": 4, "gpus": 8, "attention": "dense", "compute": "bf16"}
+                   "task": "ref2va", "nfe": 4, "gpus": 8, "attention": "request_configurable", "compute": "bf16",
+                   "capabilities": {"duration": {"min": 4, "max": 15}, "compile_bucket": 4096,
+                                    "sol_backend": "triton_tma_sm90", "optimization_defaults": optimization_defaults()}}
 
 
 def authorize(x_api_key: str | None = Header(default=None),
@@ -78,14 +79,6 @@ async def upload_reference(request: Request, kind: Literal["image", "video", "au
     return {"id": ref_id, "kind": kind, "bytes": size}
 
 
-class VideoRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    prompt: str = Field(min_length=1, max_length=32000)
-    duration: Literal[5, 10, 15] = 5
-    seed: int = Field(default_factory=lambda: secrets.randbits(32), ge=0, le=2**63 - 1, strict=True)
-    references: list[str] = Field(min_length=1, max_length=12)
-
-
 @app.post("/v1/videos", dependencies=[Depends(authorize)], status_code=202)
 def submit(payload: VideoRequest):
     if not health()[0]:
@@ -104,7 +97,11 @@ def submit(payload: VideoRequest):
     if kinds.count("image") > 9 or kinds.count("video") > 3 or kinds.count("audio") > 3:
         raise HTTPException(422, "At most 9 images, 3 videos and 3 audio references")
     try:
-        job_id = store.enqueue({**payload.model_dump(), "references": references},
+        check_workload(payload, references)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    try:
+        job_id = store.enqueue({**payload.model_dump(), "references": references, "execution": payload.execution()},
                                int(os.environ.get("MAX_QUEUE", "32")))
     except QueueFull as error:
         raise HTTPException(429, "Queue is full", headers={"Retry-After": "10"}) from error

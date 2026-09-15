@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,7 +20,7 @@ WIDTH = 1344
 HEIGHT = 768
 FPS = 24
 INFERENCE_STEPS = 5  # Five scheduler points execute four DiT forwards.
-DURATION_FRAMES = {5: 124, 10: 243, 15: 362}
+DURATION_FRAMES = {seconds: seconds * FPS + (5 - seconds * FPS) % 17 for seconds in range(4, 16)}
 ATTENTION_BACKENDS = {"dense", "sol", "sol_bsa"}
 TASKS = {"t2v", "i2v", "ref2va"}
 REFERENCE_IMAGE_RESIZE_MODES = {"match", "diffusers"}
@@ -31,6 +31,8 @@ def _resolve_reference_image_size(
     height: int,
     *,
     mode: str,
+    short_edge: int | None = None,
+    allow_upscale: bool = False,
 ) -> tuple[int, int]:
     """Resolve Ref2VA image geometry for the selected deployment profile."""
     if width <= 0 or height <= 0:
@@ -38,7 +40,11 @@ def _resolve_reference_image_size(
     if width > 4 * height or height > 4 * width:
         raise ValueError(f"A reference image must be within 1:4 and 4:1, got {width}x{height}.")
 
-    if mode == "match":
+    if short_edge is not None:
+        scale = short_edge / min(width, height)
+        if not allow_upscale:
+            scale = min(1.0, scale)
+    elif mode == "match":
         # Match the fastest validated Ref2VA profile: never upscale a source,
         # and cap larger inputs to the generated 768p canvas area.
         scale = min(1.0, math.sqrt((WIDTH * HEIGHT) / (width * height)))
@@ -76,6 +82,7 @@ class GeneratedMedia:
     elapsed_s: float
     duration: int
     seed: int
+    metadata: dict = field(default_factory=dict)
 
     def save_async(self, output_path: str | Path):
         """Stage output and encode it in the background."""
@@ -166,6 +173,9 @@ class MiniMaxH3Inference:
         self.attention_backend = attention_backend
         self.reference_image_resize_mode = reference_image_resize_mode
         self.compute_quant = compute_quant
+        self.reference_short_edge = None
+        self.reference_allow_upscale = False
+        self.reference_geometry = []
 
         from diffusers import ComponentsManager, ModularPipeline
 
@@ -173,17 +183,19 @@ class MiniMaxH3Inference:
         # 362-frame shape is a native 17*n+5 H3 sequence and is used directly.
         from diffusers.modular_pipelines.minimax_h3 import before_encoder
 
+        before_encoder.MINIMAX_H3_MIN_DURATION = 4
         before_encoder.MINIMAX_H3_MAX_DURATION = 364 / FPS
         if task == "ref2va":
             # before_encoder imports the resolver by name, so override that
             # binding without modifying the installed Diffusers package.
-            before_encoder.resolve_reference_image_size = lambda width, height: (
-                _resolve_reference_image_size(
-                    width,
-                    height,
-                    mode=self.reference_image_resize_mode,
-                )
-            )
+            def resolve(width, height):
+                h, w = _resolve_reference_image_size(
+                    width, height, mode=self.reference_image_resize_mode,
+                    short_edge=self.reference_short_edge, allow_upscale=self.reference_allow_upscale)
+                self.reference_geometry.append({"original_size": [width, height], "encoded_size": [w, h]})
+                return h, w
+
+            before_encoder.resolve_reference_image_size = resolve
 
         manager = ComponentsManager()
         if task == "ref2va":
@@ -333,12 +345,18 @@ class MiniMaxH3Inference:
         seed: int = 0,
         image: str | Path | Image.Image | None = None,
         references: list[Any] | None = None,
+        width: int = WIDTH,
+        height: int = HEIGHT,
+        output_size: tuple[int, int] | list[int] | None = None,
+        reference_short_edge: int | None = None,
+        reference_allow_upscale: bool = False,
+        optimization: dict | None = None,
     ) -> GeneratedMedia | None:
         """Generate one video. ``references`` is required only for Ref2VA."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
         if duration not in DURATION_FRAMES:
-            raise ValueError("duration must be 5, 10, or 15 seconds")
+            raise ValueError("duration must be an integer between 4 and 15 seconds")
         if self.task == "ref2va":
             if image is not None:
                 raise ValueError("image is a first-frame I2V input; use references for Ref2VA")
@@ -347,6 +365,11 @@ class MiniMaxH3Inference:
         elif references is not None:
             raise ValueError("references are only valid when task='ref2va'")
 
+        if width % 32 or height % 32:
+            raise ValueError("Inference dimensions must be multiples of 32")
+        self.reference_short_edge = reference_short_edge
+        self.reference_allow_upscale = reference_allow_upscale
+        self.reference_geometry = []
         first_frame = self._load_image(image)
         if self.world_size > 1:
             from .ulysses import reset_row_counts
@@ -356,8 +379,8 @@ class MiniMaxH3Inference:
 
         request = {
             "prompt": prompt.strip(),
-            "height": HEIGHT,
-            "width": WIDTH,
+            "height": height,
+            "width": width,
             "num_frames": DURATION_FRAMES[duration],
             "num_inference_steps": INFERENCE_STEPS,
             "generator": torch.Generator().manual_seed(int(seed)),
@@ -369,6 +392,9 @@ class MiniMaxH3Inference:
             request["references"] = list(references)
 
         torch.cuda.synchronize(self.device)
+        runtime = getattr(self, "request_runtime", None)
+        if runtime is not None:
+            runtime.begin(optimization, duration)
         started = time.perf_counter()
         state = self.pipe(**request)
         torch.cuda.synchronize(self.device)
@@ -376,6 +402,10 @@ class MiniMaxH3Inference:
             dist.barrier()
         elapsed = time.perf_counter() - started
         self._check_adaln()
+        metadata = runtime.finish() if runtime is not None else {}
+        metadata.update(reference_images=self.reference_geometry, native_frames=DURATION_FRAMES[duration],
+                        output_frames=duration * FPS, inference_size=[width, height],
+                        output_size=list(output_size or (width, height)))
 
         if not self.is_rank_zero:
             return None
@@ -383,13 +413,19 @@ class MiniMaxH3Inference:
         if videos is None:
             raise RuntimeError("pipeline returned no video")
         audio = _state_value(state, "audio")
+        from .output import prepare_output
+
+        video, waveform = prepare_output(
+            videos[0], None if audio is None else audio[0],
+            _state_value(state, "sampling_rate"), duration, output_size or (width, height))
         return GeneratedMedia(
-            video=videos[0],
-            audio=None if audio is None else audio[0],
+            video=video,
+            audio=waveform,
             audio_sample_rate=_state_value(state, "sampling_rate"),
             elapsed_s=elapsed,
             duration=duration,
             seed=int(seed),
+            metadata=metadata,
         )
 
     def generate_to_file(

@@ -34,9 +34,9 @@ def _use_tma(device) -> bool:
         for warps in (4, 8)
         for stages in (1, 2, 3, 4)
     ],
-    key=["T"],
+    key=["NT"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["T", "LIVE_N", "sink_start_block", "sink_end_block"])
 def _forward_tma(
     q_desc,
     k_desc,
@@ -47,6 +47,7 @@ def _forward_tma(
     o_desc,
     scale,
     T,
+    LIVE_N,
     sink_start_block,
     sink_end_block,
     HAS_SINK: tl.constexpr,
@@ -79,14 +80,14 @@ def _forward_tma(
     row_sum = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
     row_max = tl.full((BLOCK_SIZE,), -float("inf"), tl.float32)
     scale_log2 = scale * 1.4426950408889634
-    tail_length = T - (NT - 1) * BLOCK_SIZE
+    tail_length = T - (LIVE_N - 1) * BLOCK_SIZE
     route_threshold = tl.load(
         threshold + (batch * NT + q_block) * H + head
     )
 
     for group_start in range(0, NT, GROUP_SIZE):
         block_indices = group_start + group_offsets
-        valid = block_indices < NT
+        valid = block_indices < LIVE_N
         kc = kc_desc.load(
             [batch, group_start, head, 0]
         ).reshape([GROUP_SIZE, D])
@@ -123,7 +124,7 @@ def _forward_tma(
             vc,
         )
         lengths = tl.where(
-            block_indices == NT - 1, tail_length, BLOCK_SIZE
+            block_indices == LIVE_N - 1, tail_length, BLOCK_SIZE
         ).to(tl.float32)
         row_sum = row_sum * alpha + tl.sum(
             approximate_probability * lengths[None, :],
@@ -373,6 +374,7 @@ def sol_attn(
     thresh_type: str = "diag",
     sink_tokens: int = 0,
     sink_start: int | None = None,
+    compile_bucket_size: int | None = None,
 ) -> torch.Tensor:
     """Run Triton Sol-Attn on contiguous BF16 BTHD inputs."""
 
@@ -399,6 +401,13 @@ def sol_attn(
         sink_tokens,
     )
     use_tma = _use_tma(q.device)
+    if compile_bucket_size is not None:
+        if not use_tma:
+            raise ValueError("Bucketed Sol requires the Triton TMA backend (SM90+)")
+        if compile_bucket_size < 2048 or compile_bucket_size % 2048:
+            raise ValueError("Triton TMA compile buckets must be multiples of 2048")
+        from sol_attn.interface import _pad_to_bucket
+        q, k, v = _pad_to_bucket(q, k, v, compile_bucket_size)
 
     if use_tma:
         # Keep the original descriptor-backed preprocessing on TMA devices.
@@ -412,6 +421,7 @@ def sol_attn(
             scale=scale,
             tau=tau,
             thresh_type=thresh_type,
+            valid_tokens=tokens,
         )
         output = torch.empty_like(v)
         block_shape = [1, BLOCK, 1, head_dim]
@@ -426,17 +436,18 @@ def sol_attn(
             TensorDescriptor.from_tensor(output, block_shape),
             scale,
             tokens,
+            blocks,
             sink_start_block,
             sink_end_block,
             sink_tokens > 0,
             heads,
             head_dim,
-            blocks,
+            q.shape[1] // BLOCK if compile_bucket_size else blocks,
             head_dim,
             BLOCK,
             GROUP,
         )
-        return output
+        return output[:, :tokens]
 
     kc, vc, threshold = prepare_ptr(
         q,

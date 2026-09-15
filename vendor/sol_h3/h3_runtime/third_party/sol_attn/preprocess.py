@@ -186,7 +186,7 @@ def _reduce_kc_stats_kernel(
     configs=[triton.Config({}, num_warps=4, num_stages=2)],
     key=["N"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=["T", "TAU"])
 def _diag_threshold_kernel(
     q_desc,
     kc_mean,
@@ -200,7 +200,7 @@ def _diag_threshold_kernel(
     D: tl.constexpr,
     BLOCK: tl.constexpr,
     TILE_D: tl.constexpr,
-    TAU: tl.constexpr,
+    TAU,
     STORE_Q_BAR: tl.constexpr,
 ):
     q_block, batch_head = tl.program_id(0), tl.program_id(1)
@@ -280,7 +280,7 @@ def _exact_fused_threshold_kernel(
     D: tl.constexpr,
     BLOCK_M: tl.constexpr,
     TILE_D: tl.constexpr,
-    TAU: tl.constexpr,
+    TAU,
 ):
     row_tile, batch_head = tl.program_id(0), tl.program_id(1)
     rows = row_tile * BLOCK_M + tl.arange(0, BLOCK_M)

@@ -30,6 +30,14 @@ class Store:
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, created);
             """)
 
+        # Additive migration preserves existing tasks when updating the service.
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "metrics" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN metrics TEXT")
+            db.commit()
+
     @contextmanager
     def connect(self):
         db = sqlite3.connect(self.db, timeout=30, isolation_level=None)
@@ -74,11 +82,11 @@ class Store:
             return {"id": row["id"], **json.loads(row["payload"])}
 
     def finish(self, job_id: str, *, output: str | None = None,
-               inference_s: float | None = None, error: str | None = None) -> None:
+               inference_s: float | None = None, error: str | None = None, metrics: dict | None = None) -> None:
         with self.connect() as db:
-            db.execute("""UPDATE jobs SET status=?,finished=?,output=?,inference_s=?,error=?
+            db.execute("""UPDATE jobs SET status=?,finished=?,output=?,inference_s=?,error=?,metrics=?
                           WHERE id=? AND status='running'""",
-                       ("failed" if error else "succeeded", time.time(), output, inference_s, error, job_id))
+                       ("failed" if error else "succeeded", time.time(), output, inference_s, error, json.dumps(metrics) if metrics else None, job_id))
 
     def get(self, job_id: str) -> dict | None:
         with self.connect() as db:
@@ -88,6 +96,8 @@ class Store:
         item = dict(row)
         payload = json.loads(item.pop("payload"))
         item.update(duration=payload["duration"], seed=payload["seed"], task="ref2va", nfe=4)
+        item["execution"] = payload.get("execution")
+        item["metrics"] = json.loads(item["metrics"]) if item.get("metrics") else None
         return item
 
     def fail_pending(self, reason: str) -> None:

@@ -80,7 +80,7 @@ def test_reject_bad_input_before_gpu(api, monkeypatch):
     for payload in [
         {"prompt": " ", "references": [ref]},
         {"prompt": "p", "references": ["missing"]},
-        {"prompt": "p", "references": [ref], "duration": 6},
+        {"prompt": "p", "references": [ref], "duration": 16},
         {"prompt": "p", "references": [ref], "steps": 50},
         {"prompt": "p", "references": [ref], "seed": -1},
         {"prompt": "p", "references": [ref] * 10},
@@ -106,3 +106,32 @@ def test_full_queue_and_failed_task(api, monkeypatch):
     assert result["error"] == "GPU worker exited"
     assert client.get(f"/v1/videos/{job_id}/content").status_code == 409
     assert client.post("/v1/videos", json=payload).status_code == 202
+
+
+def test_tuned_request_survives_queue_and_result(api):
+    module, client = api
+    ref = upload_image(client)
+    payload = {"prompt": "p", "references": [ref], "duration": 8, "width": 720, "height": 1280,
+               "reference_short_edge": 512,
+               "optimization": {"sol_attn": {"enabled": True, "tau": 1.2},
+                                "cache_dit": {"enabled": True, "rdt": 0.15}}}
+    response = client.post("/v1/videos", json=payload)
+    assert response.status_code == 202, response.text
+    job = module.store.claim()
+    assert job["execution"]["output_size"] == [720, 1280]
+    assert job["execution"]["inference_size"] == [736, 1280]
+    assert job["execution"]["native_frames"] == 192
+    assert job["execution"]["optimization"]["sol_attn"]["tau"] == 1.2
+    module.store.finish(job["id"], metrics={"cache_dit": {"cached_steps": 1}})
+    result = client.get(f"/v1/videos/{job['id']}").json()
+    assert result["execution"] == job["execution"]
+    assert result["metrics"]["cache_dit"]["cached_steps"] == 1
+
+
+def test_admission_rejects_excessive_combined_workload(api, monkeypatch):
+    _, client = api
+    ref = upload_image(client)
+    monkeypatch.setenv("MAX_PACKED_TOKENS", "4096")
+    response = client.post("/v1/videos", json={"prompt": "p", "references": [ref], "duration": 15})
+    assert response.status_code == 422
+    assert "MAX_PACKED_TOKENS" in response.text

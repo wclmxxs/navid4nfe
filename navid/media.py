@@ -38,19 +38,28 @@ def validate_reference(path: Path, kind: str) -> None:
             raise ValueError(f"File contains no decodable {kind} frames")
 
 
-def verify_output(path: Path, expected_frames: int | None = None) -> dict:
+def verify_output(path: Path, expected_frames: int | None = None,
+                  expected_size=(1344, 768), expected_duration: int | None = None) -> dict:
     import av
     with av.open(str(path)) as container:
         video = next((s for s in container.streams if s.type == "video"), None)
         audio = next((s for s in container.streams if s.type == "audio"), None)
         if video is None or audio is None:
             raise RuntimeError("Generated MP4 must contain both video and audio")
-        if (video.width, video.height) != (1344, 768):
+        if (video.width, video.height) != tuple(expected_size):
             raise RuntimeError("Generated MP4 has unexpected dimensions")
+        width, height = video.width, video.height
+        if video.average_rate != 24:
+            raise RuntimeError("Generated MP4 must be 24 FPS")
         frames = sum(1 for _ in container.decode(video))
         if not frames or (expected_frames is not None and frames != expected_frames):
             raise RuntimeError(f"Generated MP4 has {frames} video frames; expected {expected_frames or 'at least one'}")
     with av.open(str(path)) as container:
-        if not sum(1 for _ in container.decode(audio=0)):
+        samples = sum(frame.samples for frame in container.decode(audio=0))
+        if not samples:
             raise RuntimeError("Generated MP4 has no decodable audio frame")
-    return {"width": 1344, "height": 768, "frames": frames, "audio": True}
+        audio_seconds = samples / container.streams.audio[0].rate
+        # AAC may add a partial final codec frame; permit at most 0.1 s padding.
+        if expected_duration is not None and abs(audio_seconds - expected_duration) > 0.1:
+            raise RuntimeError(f"Generated audio duration {audio_seconds:.3f}s differs from {expected_duration}s")
+    return {"width": width, "height": height, "frames": frames, "audio": True, "audio_seconds": audio_seconds}

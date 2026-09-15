@@ -17,7 +17,14 @@ def main() -> None:
     parser.add_argument("--api-key", default=os.environ.get("API_KEY"))
     parser.add_argument("--reference", action="append", required=True, help="image:PATH, video:PATH or audio:PATH; repeat in order")
     parser.add_argument("--prompt", default="A continuous cinematic shot featuring the subject in Picture 1. Natural motion and ambient sound.")
-    parser.add_argument("--duration", type=int, choices=[5, 10, 15], default=5)
+    parser.add_argument("--duration", type=int, choices=range(4, 16), default=5)
+    parser.add_argument("--width", type=int)
+    parser.add_argument("--height", type=int)
+    parser.add_argument("--reference-short-edge", type=int)
+    parser.add_argument("--sol", action="store_true")
+    parser.add_argument("--tau", type=float, default=1.0)
+    parser.add_argument("--cache-dit", action="store_true")
+    parser.add_argument("--rdt", type=float, default=0.08)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--output", type=Path, default=Path("data/smoke.mp4"))
@@ -42,8 +49,13 @@ def main() -> None:
             parser.error("--reference must be image:PATH, video:PATH or audio:PATH")
         ref = json.loads(call(f"/v1/references?kind={kind}", Path(name).read_bytes(), "application/octet-stream"))
         refs.append(ref["id"])
-    job = json.loads(call("/v1/videos", json.dumps({"prompt": args.prompt, "duration": args.duration,
-                         "seed": args.seed, "references": refs}).encode()))
+    payload = {"prompt": args.prompt, "duration": args.duration, "seed": args.seed, "references": refs,
+               "optimization": {"sol_attn": {"enabled": args.sol, "tau": args.tau},
+                                "cache_dit": {"enabled": args.cache_dit, "rdt": args.rdt}}}
+    for name in ("width", "height", "reference_short_edge"):
+        if getattr(args, name) is not None:
+            payload[name] = getattr(args, name)
+    job = json.loads(call("/v1/videos", json.dumps(payload).encode()))
     print(f"Submitted task {job['id']}", flush=True)
     deadline = time.monotonic() + args.timeout
     previous = None
@@ -57,6 +69,8 @@ def main() -> None:
         if result["status"] == "succeeded":
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(call(result["content_url"]))
+            args.output.with_suffix(".json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            print(json.dumps(result.get("metrics"), ensure_ascii=False))
             print(f"Saved {args.output.resolve()} (GPU pipeline {result['inference_s']} s, NFE={result['nfe']})")
             return
         time.sleep(2)

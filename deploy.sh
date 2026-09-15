@@ -4,11 +4,11 @@ set -Eeuo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
 action=${1:-deploy}
-if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|errors|gpu-status|check]" >&2; exit 2; fi
+if [[ $# -gt 1 ]]; then echo "Usage: $0 [deploy|start|stop|restart|status|logs|errors|gpu-status|check|verify]" >&2; exit 2; fi
 case "$action" in
   -h|--help|help)
     cat <<'HELP'
-Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|check]
+Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|check|verify]
   deploy   Default: install a private Python/CUDA environment, download pinned
            Ref2VA weights, start the API + eight GPU ranks, wait for real warmup.
   start    Start an already installed deployment and wait for readiness.
@@ -19,20 +19,23 @@ Usage: ./deploy.sh [deploy|start|stop|restart|status|logs|errors|gpu-status|chec
   errors   Show the original worker exception without loading the model again.
   gpu-status  Capture live GPU owners, parent processes and Docker containers.
   check    Check the installed CUDA/kernel environment and checkpoint layout.
+  verify   Run live tuning A/B, duration and resolution checks; keep MP4 results.
 
 Target: Linux with 8 NVIDIA H200 GPUs and driver >=570.26.
 Optional configuration: .env (see .env.example); shell environment takes priority.
 No Docker or systemd required. Ctrl-C during startup cancels the new service.
 HELP
     exit 0 ;;
-  deploy|start|stop|restart|status|logs|errors|gpu-status|check) ;;
+  deploy|start|stop|restart|status|logs|errors|gpu-status|check|verify) ;;
   *) echo "Unknown action: $action (use --help)" >&2; exit 2 ;;
 esac
 [[ $(uname -s) == Linux ]] || { echo "Deployment requires a Linux H200 host." >&2; exit 1; }
 
 # Preserve explicit shell overrides when loading optional .env configuration.
 keys=(HOST PORT CUDA_VISIBLE_DEVICES HF_TOKEN HF_ENDPOINT DATA_DIR CHECKPOINT_DIR MODEL_DIR ADAPTER_PATH
-      READY_TIMEOUT TASK_TIMEOUT MAX_QUEUE MAX_UPLOAD_MB VAE_COMPILE)
+      READY_TIMEOUT TASK_TIMEOUT MAX_QUEUE MAX_UPLOAD_MB VAE_COMPILE DIT_COMPILE
+      SOL_ATTN_ENABLED SOL_ATTN_TAU SOL_ATTN_DENSE_STEPS CACHE_DIT_ENABLED CACHE_DIT_WARMUP
+      CACHE_DIT_RDT CACHE_DIT_MAX_CONTINUOUS MAX_OUTPUT_PIXELS MAX_PACKED_TOKENS)
 saved_keys=() saved_values=()
 for key in "${keys[@]}"; do
   if value=$(printenv "$key"); then saved_keys+=("$key"); saved_values+=("$value"); fi
@@ -69,6 +72,9 @@ fi
 if [[ $action == logs ]]; then
   touch .runtime/service.log .runtime/api.log .runtime/worker.log
   exec tail -n 60 -F .runtime/service.log .runtime/api.log .runtime/worker.log
+fi
+if [[ $action == verify ]]; then
+  exec "$PYTHON" scripts/verify_tuning.py
 fi
 if [[ $action == stop || $action == status || $action == errors ]]; then
   if [[ ! -x $PYTHON ]]; then echo "Not deployed yet."; [[ $action == stop ]]; exit; fi
